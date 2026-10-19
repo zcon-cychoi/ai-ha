@@ -1,0 +1,57 @@
+[Unit]
+Description=AI-HA framework server
+Documentation=https://github.com/cloud-barista/ai-ha
+# The framework only calls out to PostgreSQL and serves HTTPS; nothing here
+# requires the database to be co-located, so no hard dependency on a local
+# postgresql.service is declared. Add one if this deployment runs it locally.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aiha-framework server
+
+# AIHA_FRAMEWORK_DB_DSN, AIHA_FRAMEWORK_TLS_CERT/KEY, AIHA_FRAMEWORK_PUBLIC_URL
+# and the rest of AIHA_FRAMEWORK_*; see conf/template-setup.env. The DB DSN
+# carries a password, so keep the file root-owned and mode 0600 even though
+# the service itself runs unprivileged.
+EnvironmentFile=/etc/aiha/framework.env
+
+# All state lives in PostgreSQL, not on disk, so a crash loses nothing local
+# to restart with. Restart unconditionally; a DB that is merely unreachable
+# is not fatal on its own — the server fails to start against it and is
+# retried here rather than looping in-process.
+Restart=on-failure
+RestartSec=10s
+
+# Unlike aiha-agent, this server never touches raw partitions or bind mounts,
+# so nothing here needs relaxing: it runs as a dedicated unprivileged user
+# with the full sandbox applied. Static, not DynamicUser=true: it must match
+# the fixed uid that owns /etc/aiha/framework.{env,crt,key} (mode 0600), which
+# a per-activation dynamic uid could never read.
+User=aiha
+Group=aiha
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+
+# Read-only access to the certificate/key referenced by AIHA_FRAMEWORK_TLS_CERT
+# and AIHA_FRAMEWORK_TLS_KEY. Adjust the path if they live elsewhere.
+ReadOnlyPaths=/etc/aiha
+
+[Install]
+WantedBy=multi-user.target

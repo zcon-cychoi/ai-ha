@@ -1,0 +1,28 @@
+#!/bin/bash
+# SystemRescue autorun script for AI-HA restores. It is part of the rescue
+# image: put it in sysres.tar as autorun/autorun2 (mode 0755). It is the same
+# for every restore — what differs per instance, the agent and recovery.env,
+# sh/aiha-init.sh installs under /autorun/aiha/.
+#
+# copytoram brings /autorun into RAM, so nothing here touches the disk being
+# restored. The agent is copied into RAM before it runs, in case the boot
+# medium is mounted noexec, and it keeps its state in the tmpfs /run/aiha
+# because the staged repository credentials must never reach a disk.
+#
+# "aiha-rescue rescue" claims the restore job and then restores it: it formats
+# the partitions of the backup set. Run by hand only on a disposable target.
+#
+# autorun runs this as a service, with a PATH shorter than a login shell's.
+# SystemRescue's own tools (mountall among them) are found only on the login
+# PATH, so the restore would refuse to start for want of them. /etc/profile
+# sets that PATH; it is read with nounset off because it was not written for it.
+set +u
+# shellcheck disable=SC1091
+. /etc/profile
+set -Eeuo pipefail
+umask 077
+AUTORUN=/run/archiso/bootmnt/autorun
+install -d -m 0700 /run/aiha
+install -m 0700 "$AUTORUN/aiha/aiha-rescue" /run/aiha/aiha-rescue
+exec /run/aiha/aiha-rescue rescue \
+    --recovery-file "$AUTORUN/aiha/recovery.env" --out-dir /run/aiha

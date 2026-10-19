@@ -1,0 +1,58 @@
+[Unit]
+Description=AI-HA agent
+Documentation=https://github.com/cloud-barista/ai-ha
+# The agent reaches the framework outbound only; it opens no listening port.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aiha-agent run
+
+# AIHA_AGENT_FRAMEWORK_URL, AIHA_AGENT_FRAMEWORK_CERT_PIN, AIHA_AGENT_FRAMEWORK_CERT_SHA256 and, until the
+# agent has enrolled, AIHA_AGENT_REGISTRATION_TOKEN. Remove the registration
+# token once enrolment has succeeded: it is spent and serves no further
+# purpose. Keep the file root-owned and mode 0600.
+EnvironmentFile=/etc/aiha/agent.env
+
+# Restart only what restarting can fix.
+#
+# A revoked credential, a system awaiting boot verification and a bad
+# configuration do not improve by starting again: the agent exits with a
+# distinct status for each so that they are not retried forever. A framework
+# that is merely unreachable is not one of them — the agent backs off and
+# retries in-process, because that is a wait, not a crash.
+Restart=on-failure
+RestartSec=10s
+RestartPreventExitStatus=10 11 12
+
+# The agent runs as root because backing up a partition bind-mounts it. That
+# rules out the sandboxing options that would otherwise belong here:
+# ProtectSystem=strict and ReadOnlyPaths would block the mounts, PrivateMounts
+# would hide them from the rest of the system, and PrivateDevices would hide
+# the block devices being read.
+#
+# ProtectHome is excluded for the same reason, less obviously. It gives the
+# unit a mount namespace of its own and bind mounts /home and /root inside it
+# — and once the unit is namespaced, StateDirectory below is bind mounted too.
+# The agent reads /proc/self/mountinfo to learn what this system is made of,
+# so it would report those three as partitions of a machine that has no such
+# mounts, and the bind mount a backup makes would be invisible to the host.
+#
+# What is left is applied.
+User=root
+NoNewPrivileges=false
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# The agent's identity and credentials live here. It is excluded from its own
+# backups, so that a restored system does not come up holding them.
+StateDirectory=aiha
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

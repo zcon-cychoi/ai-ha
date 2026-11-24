@@ -55,14 +55,26 @@ func (p *PartitionSource) SetAgentStateDir(dir string) {
 	p.agentStateDir = dir
 }
 
+// ReplicationResourceFiles are the replication resource files, which hold the
+// peers' shared secret of an HA group. Every one of them is left out of a root
+// partition's archive: a secret in an archive travels to wherever the archive
+// does, and a system restored from it is not one of the pair it names. Setup
+// writes the file again on a node that is to replicate.
+const ReplicationResourceFiles = "/etc/drbd.d/*.res"
+
+// replicationResourceExclude matches ReplicationResourceFiles as archive
+// paths.
+var replicationResourceExclude = regexp.MustCompile(`^etc/drbd\.d/[^/]+\.res$`)
+
 // ExcludedPaths implements ExcludedPathProvider, naming the agent's state
-// directory so that a restore knows its absence from the archive is intended.
+// directory and the replication resource files so that a restore knows their
+// absence from the archive is intended.
 func (p *PartitionSource) ExcludedPaths() []string {
 	dir := p.agentStateDir
 	if dir == "" {
 		dir = DefaultAgentStateDir
 	}
-	return []string{filepath.Clean(dir)}
+	return []string{filepath.Clean(dir), ReplicationResourceFiles}
 }
 
 // agentStateExclude returns the pattern excluding the agent's state, as an
@@ -106,6 +118,7 @@ func (p *PartitionSource) Excludes(root string) []*regexp.Regexp {
 		if agentState := agentStateExclude(p.agentStateDir); agentState != nil {
 			excludes = append(excludes, agentState)
 		}
+		excludes = append(excludes, replicationResourceExclude)
 	}
 	return excludes
 }

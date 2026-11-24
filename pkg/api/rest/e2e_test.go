@@ -51,7 +51,7 @@ func e2eFramework(t *testing.T) (http.Handler, *pgxpool.Pool) {
 		t.Fatalf("box: %v", err)
 	}
 	repos := repository.NewService(repository.NewPGStore(pool), box)
-	jobs := job.NewService(job.NewPGStore(pool), repos, time.Hour, time.Minute,
+	jobs := job.NewService(job.NewPGStore(pool), repos, nil, job.TTLs{Backup: time.Hour, HA: 5 * time.Minute}, time.Minute,
 		job.Timings{ProgressInterval: 10 * time.Second, LeaseTTL: 90 * time.Second})
 
 	return NewHandler(Config{
@@ -175,6 +175,10 @@ func TestManagementAPIEndToEnd(t *testing.T) {
 		model.AgentJobClaimReq{ClaimRequestKey: testRegistrationKey}, http.StatusOK, &claimed)
 	if claimed.Repository.SecretKey != "e2e-secret" || claimed.Repository.Bucket != "aiha-backup" {
 		t.Fatalf("repository handed to the agent = %+v", claimed.Repository)
+	}
+	// The agent picks its runner by kind; a backup carries no replication secret.
+	if claimed.Kind != model.JobKindBackup || claimed.Replication != nil {
+		t.Fatalf("claim kind = %q, replication = %+v", claimed.Kind, claimed.Replication)
 	}
 	var spec model.BackupJobSpec
 	if err := json.Unmarshal(claimed.Spec, &spec); err != nil {

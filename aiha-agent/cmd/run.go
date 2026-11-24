@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/cloud-barista/ai-ha/pkg/agent/framework"
+	"github.com/cloud-barista/ai-ha/pkg/agent/ha/health"
 	"github.com/cloud-barista/ai-ha/pkg/agent/state"
 	"github.com/cloud-barista/ai-ha/pkg/agent/worker"
+	apimodel "github.com/cloud-barista/ai-ha/pkg/api/rest/model"
 	"github.com/cloud-barista/ai-ha/pkg/backup/model"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
@@ -99,11 +101,18 @@ func run(ctx context.Context) error {
 		Dur("pollWait", wait).Dur("inventoryInterval", inventoryEvery).Msg("Agent running")
 
 	hostname, _ := os.Hostname()
-	w := worker.New(client, cred.Token, backupRunner{
-		// The id the framework enrolled this agent under, which is the one
-		// its jobs are created for.
-		system:   model.SystemInfo{ID: cred.SystemID, Hostname: hostname},
-		stateDir: agentCfg.StateDir,
+	// One runner per kind this agent runs. A job of any other kind is
+	// claimed and reported failed rather than left to come back.
+	configurer := newReplicationConfigurer()
+	w := worker.New(client, cred.Token, map[string]worker.Runner{
+		apimodel.JobKindBackup: backupRunner{
+			// The id the framework enrolled this agent under, which is the
+			// one its jobs are created for.
+			system:   model.SystemInfo{ID: cred.SystemID, Hostname: hostname},
+			stateDir: agentCfg.StateDir,
+		},
+		apimodel.JobKindReplicationSetup:    replicationSetupRunner{c: configurer},
+		apimodel.JobKindReplicationTeardown: replicationTeardownRunner{c: configurer},
 	}, agentCfg.StateDir)
 
 	// Reporting runs beside the poll rather than inside it: reading the disks
@@ -114,11 +123,16 @@ func run(ctx context.Context) error {
 	defer stopReporting()
 
 	var reporting sync.WaitGroup
-	reporting.Add(1)
-	go func() {
-		defer reporting.Done()
+	reporting.Go(func() {
 		reportInventory(reportCtx, client, readSystem, cred.Token, inventoryEvery)
-	}()
+	})
+	// Health has its own loop for the same reason, and one more: the
+	// framework judges an HA node silent from these reports alone, so they
+	// must keep coming while a job holds the poll.
+	collector := health.NewCollector(nil)
+	reporting.Go(func() {
+		reportHealth(reportCtx, client, collector.Measure, cred.Token)
+	})
 
 	err = poll(ctx, client, w, cred.Token, wait)
 	stopReporting()

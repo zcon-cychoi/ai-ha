@@ -278,6 +278,16 @@ func (c *Client) Inventory(ctx context.Context, agentToken string, req model.Age
 	return c.postJSON(ctx, agentToken, "/aiha/agent/inventory", req, nil)
 }
 
+// Health reports this node's measurements and returns its HA assignment.
+//
+// Like Inventory, the report names no system: the framework files it under
+// the one this agent's token was issued for.
+func (c *Client) Health(ctx context.Context, agentToken string, req model.AgentHealthReq) (model.AgentHealthResp, error) {
+	var out model.AgentHealthResp
+	err := c.postJSON(ctx, agentToken, "/aiha/agent/health", req, &out)
+	return out, err
+}
+
 // postJSON sends an authenticated request and decodes the reply into out,
 // which may be nil for a reply with no body.
 //

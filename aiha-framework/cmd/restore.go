@@ -165,7 +165,7 @@ func agentURL(raw string) (string, error) {
 // secret key: creating a job records the repository's ID, and only the server
 // decrypts credentials, for each claim.
 func restoreServiceFor(pool *pgxpool.Pool) (*restore.Service, error) {
-	repos, jobs, err := newServices(pool, false)
+	repos, jobs, _, err := newServices(pool, false)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloud-barista/ai-ha/pkg/api/rest/model"
 	"github.com/cloud-barista/ai-ha/pkg/framework/agent"
+	"github.com/cloud-barista/ai-ha/pkg/framework/ha"
 	"github.com/cloud-barista/ai-ha/pkg/framework/inventory"
 	"github.com/cloud-barista/ai-ha/pkg/framework/job"
 	"github.com/labstack/echo/v4"
@@ -43,6 +44,9 @@ type agentHandler struct {
 	// report what their systems are made of, and backup targets have to be
 	// named by hand.
 	inventory *inventory.Service
+	// ha is nil when the server runs without one; nodes then cannot report
+	// their health.
+	ha *ha.Service
 }
 
 // RestPostAgentRegister godoc
@@ -118,16 +122,52 @@ func registerFailure(err error) (int, string) {
 // RestPostAgentHealth godoc
 // @ID PostAgentHealth
 // @Summary Report a node's health
-// @Description Not implemented yet: answers 501. Will take a node's measurements of its service and replication, and answer with its HA assignment. The system will come from the agent's token, never from the body.
+// @Description Report the calling node's measurements of its service, GPUs and replication, and receive its HA assignment: the role, what to check and, for the standby, where to probe the primary. The framework judges the measurements; the node only measures. A node in no HA group is answered with assigned false and keeps reporting, so that it notices when it joins one. Measurements are judged only when the group and role they name are the node's current ones. The system is taken from the agent's token, never from the body.
 // @Tags [Agent] Health
 // @Accept json
 // @Produce json
+// @Param agentHealthReq body model.AgentHealthReq true "Health report"
+// @Success 200 {object} model.AgentHealthResp
+// @Failure 400 {object} model.SimpleMsg
 // @Failure 401 {object} model.SimpleMsg
-// @Failure 501 {object} model.SimpleMsg
+// @Failure 500 {object} model.SimpleMsg
 // @Security AgentToken
 // @Router /agent/health [post]
-func RestPostAgentHealth(c echo.Context) error {
-	return notImplemented(c)
+func (h *agentHandler) RestPostAgentHealth(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	var req model.AgentHealthReq
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, model.SimpleMsg{Message: "Malformed request body: check JSON syntax"})
+	}
+	if err := c.Validate(&req); err != nil {
+		return c.JSON(http.StatusBadRequest,
+			model.SimpleMsg{Message: "Health report rejected: a collection time is required, and the role is primary or standby"})
+	}
+
+	// The node is the one this agent's token was issued for. Taking it from
+	// the body would let any valid token keep a dead primary looking alive.
+	systemID, agentID := systemIDOf(c), agentIDOf(c)
+
+	resp, err := h.ha.Report(ctx, systemID, agentID, req)
+	if err != nil {
+		if errors.Is(err, ha.ErrInvalidRequest) {
+			log.Warn().Err(err).Str("systemId", systemID).Str("agentId", agentID).Msg("Health report refused")
+			return c.JSON(http.StatusBadRequest,
+				model.SimpleMsg{Message: "Health report rejected: report the group and the role together, or neither"})
+		}
+		log.Error().Err(err).Str("systemId", systemID).Str("agentId", agentID).Msg("Health report not recorded")
+		return c.JSON(http.StatusInternalServerError, model.SimpleMsg{Message: "Health report could not be recorded"})
+	}
+
+	// Logged at debug: every node reports every half minute, and the verdicts
+	// that matter are recorded as the group's events.
+	evt := log.Debug().Str("systemId", systemID).Str("agentId", agentID).Bool("assigned", resp.Assigned)
+	if resp.Assignment != nil {
+		evt = evt.Str("groupId", resp.Assignment.GroupID).Str("role", resp.Assignment.Role)
+	}
+	evt.Msg("Health reported")
+	return c.JSON(http.StatusOK, resp)
 }
 
 // RestGetAgentJobs godoc

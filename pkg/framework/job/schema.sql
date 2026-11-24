@@ -1,13 +1,23 @@
--- Backup job queue. Applied at startup; creates the tables only when they are
--- absent and does not alter existing ones.
+-- Job queue. Applied by every command that opens the database, so each
+-- statement is safe to repeat: tables are created only when absent, and the
+-- changes made to existing tables (jobs_kind_check and the indexes below) are
+-- made only when they are missing.
+--
+-- "Only when missing" is decided from the catalog, not left to IF NOT EXISTS.
+-- CREATE INDEX IF NOT EXISTS locks its table before it finds the index there,
+-- and this file runs as one transaction, so a command starting up held a lock
+-- on jobs while it waited for one on attempts — the order a claim takes them
+-- in reverse, which PostgreSQL ends as a deadlock.
 
--- A job is the logical work a user asked for. It outlives the attempts made to
--- carry it out, which is why the attempt is a separate row: reporting is tied
--- to an attempt, so a late report from a superseded one cannot move the job.
+-- A job is the logical work a user or an HA flow asked for. It outlives the
+-- attempts made to carry it out, which is why the attempt is a separate row:
+-- reporting is tied to an attempt, so a late report from a superseded one
+-- cannot move the job.
 CREATE TABLE IF NOT EXISTS jobs (
     job_id             text        PRIMARY KEY,
     system_id          text        NOT NULL,
-    kind               text        NOT NULL CHECK (kind IN ('backup')),
+    -- Constrained by jobs_kind_check below.
+    kind               text        NOT NULL,
     status             text        NOT NULL
         CHECK (status IN ('queued', 'claimed', 'running', 'completed',
                           'failed', 'cancelling', 'cancelled')),
@@ -28,13 +38,45 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at        timestamptz
 );
 
--- A job waiting for an agent is looked up by system on every long poll.
-CREATE INDEX IF NOT EXISTS jobs_queued
-    ON jobs (system_id, created_at) WHERE status = 'queued';
+-- The kinds a job may have, matching the Kind constants. Tables created when
+-- only backups existed carry an inline check under the same name that admits
+-- 'backup' alone; it is replaced here. Replacing it locks the table and
+-- re-reads every row, so it is done only when the constraint is missing or
+-- does not yet name every kind. The constraint is written as an IN list so
+-- that PostgreSQL shows each kind as its own quoted literal, which is what
+-- the test for "names every kind" looks for.
+DO $$
+DECLARE
+    kinds text[] := ARRAY['backup', 'replication-setup', 'replication-teardown',
+                          'ha-demote', 'ha-promote', 'ha-rejoin'];
+    def   text;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO def
+      FROM pg_constraint
+     WHERE conrelid = 'jobs'::regclass AND conname = 'jobs_kind_check';
+    IF def IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM unnest(kinds) AS k WHERE strpos(def, quote_literal(k)) = 0) THEN
+        RETURN;
+    END IF;
+    ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_kind_check;
+    EXECUTE format('ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check CHECK (kind IN (%s))',
+                   (SELECT string_agg(quote_literal(k), ', ') FROM unnest(kinds) AS k));
+END
+$$;
 
--- The sweeper walks jobs that can still time out.
-CREATE INDEX IF NOT EXISTS jobs_unfinished
-    ON jobs (status) WHERE status IN ('queued', 'claimed', 'running', 'cancelling');
+-- A job waiting for an agent is looked up by system on every long poll, and
+-- the sweeper walks jobs that can still time out.
+DO $$
+BEGIN
+    IF to_regclass('jobs_queued') IS NULL THEN
+        CREATE INDEX jobs_queued ON jobs (system_id, created_at) WHERE status = 'queued';
+    END IF;
+    IF to_regclass('jobs_unfinished') IS NULL THEN
+        CREATE INDEX jobs_unfinished
+            ON jobs (status) WHERE status IN ('queued', 'claimed', 'running', 'cancelling');
+    END IF;
+END
+$$;
 
 -- One execution of a job by one agent.
 CREATE TABLE IF NOT EXISTS attempts (
@@ -70,7 +112,13 @@ CREATE TABLE IF NOT EXISTS attempts (
     finished_at       timestamptz
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS attempts_claim_key
-    ON attempts (job_id, claim_request_key);
-
-CREATE INDEX IF NOT EXISTS attempts_job ON attempts (job_id);
+DO $$
+BEGIN
+    IF to_regclass('attempts_claim_key') IS NULL THEN
+        CREATE UNIQUE INDEX attempts_claim_key ON attempts (job_id, claim_request_key);
+    END IF;
+    IF to_regclass('attempts_job') IS NULL THEN
+        CREATE INDEX attempts_job ON attempts (job_id);
+    END IF;
+END
+$$;

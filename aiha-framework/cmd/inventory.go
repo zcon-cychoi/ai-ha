@@ -92,6 +92,27 @@ func printInventory(cmd *cobra.Command, svc *inventory.Service, stored inventory
 			describeUse(p), orDash(p.Reason))
 	}
 	_ = w.Flush()
+
+	// The disks a replicated volume can be set up on, named as "ha create"
+	// takes them.
+	if len(inv.DataDisks) == 0 {
+		return
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Data disks (whole, unpartitioned, unmounted):")
+	w = tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "BY-ID PATH\tDEVICE NOW\tSIZE\tHOLDS")
+	for _, d := range inv.DataDisks {
+		holds := d.Signature
+		switch holds {
+		case "":
+			holds = "nothing"
+		case "drbd":
+			holds = "replication metadata"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", orDash(d.ByIDPath), orDash(d.Device), describeBytes(d.SizeBytes), holds)
+	}
+	_ = w.Flush()
 }
 
 // describeUse says how a partition may be backed up.

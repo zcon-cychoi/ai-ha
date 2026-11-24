@@ -17,6 +17,7 @@ import (
 
 	"github.com/cloud-barista/ai-ha/pkg/api/rest/model"
 	"github.com/cloud-barista/ai-ha/pkg/framework/agent"
+	"github.com/cloud-barista/ai-ha/pkg/framework/ha"
 	"github.com/cloud-barista/ai-ha/pkg/framework/inventory"
 	"github.com/cloud-barista/ai-ha/pkg/framework/job"
 	"github.com/cloud-barista/ai-ha/pkg/framework/repository"
@@ -277,12 +278,14 @@ func newMgmtEnv(t *testing.T) *mgmtEnv {
 	}
 
 	repos := repository.NewService(env.repos, box)
-	jobs := job.NewService(env.jobs, repos, time.Hour, time.Minute,
+	jobs := job.NewService(env.jobs, repos, nil, job.TTLs{Backup: time.Hour, HA: 5 * time.Minute}, time.Minute,
 		job.Timings{ProgressInterval: 10 * time.Second, LeaseTTL: 90 * time.Second})
 	env.cfg = Config{
-		Agent:           agent.NewService(env.agents),
-		Jobs:            jobs,
-		Inventory:       inventory.NewService(env.inv),
+		Agent:     agent.NewService(env.agents),
+		Jobs:      jobs,
+		Inventory: inventory.NewService(env.inv),
+		HA: ha.NewService(&haStore{}, nil, ha.Timings{ReportInterval: 30 * time.Second, StaleAfter: 90 * time.Second},
+			func() string { return "0000000000000001" }),
 		Repositories:    repos,
 		Restore:         restore.NewService(env.restores, jobs, repos, time.Hour, time.Minute),
 		AdminAuth:       StaticAdminToken(token.Hash(testAdminToken)),
@@ -494,9 +497,6 @@ func TestUnimplementedRoutesAnswer501(t *testing.T) {
 		})
 	}
 
-	enrolled := enrol(t, env.h)
-	expectFailure(t, request(env.h, http.MethodPost, "/aiha/agent/health", "Bearer "+enrolled.AgentToken, ""),
-		http.StatusNotImplemented, model.CodeNotImplemented)
 	expectFailure(t, request(env.h, http.MethodPost, "/aiha/agent/restore/r/boot-verify", "", ""),
 		http.StatusNotImplemented, model.CodeNotImplemented)
 }
@@ -760,6 +760,22 @@ func TestJobCancel(t *testing.T) {
 
 	expectFailure(t, env.call(http.MethodPost, "/aiha/jobs/done-job/cancel", ""), http.StatusConflict, model.CodeJobFinished)
 	expectFailure(t, env.call(http.MethodPost, "/aiha/jobs/no-such-job/cancel", ""), http.StatusNotFound, model.CodeNotFound)
+}
+
+// An HA job ends with its HA operation; cancelling it alone is refused and
+// leaves it as it was.
+func TestHAJobCancelIsRefused(t *testing.T) {
+	env := newMgmtEnv(t)
+	env.jobs.add("ha-job", job.StatusQueued, "")
+	env.jobs.mu.Lock()
+	env.jobs.jobs[0].Kind = job.KindHAPromote
+	env.jobs.mu.Unlock()
+
+	expectFailure(t, env.call(http.MethodPost, "/aiha/jobs/ha-job/cancel", ""), http.StatusConflict, model.CodeConflict)
+	j, _, err := env.jobs.Get(context.Background(), "ha-job")
+	if err != nil || j.Status != job.StatusQueued {
+		t.Fatalf("job = %+v (%v), want still queued", j, err)
+	}
 }
 
 func TestRestoreRequest(t *testing.T) {

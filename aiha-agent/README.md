@@ -35,8 +35,12 @@ produces both.
 | Restoring a backup set in the rescue environment (`rescue`, `restore`) | ✅ implemented — same-image target only, see [plan/Restore.md](../plan/Restore.md) 3.8 |
 | Rescue claim and restore progress/result reports (`rescue`) | ✅ implemented |
 | Enrolment (`register`, `reset`) and the long-poll loop (`run`) | ✅ implemented |
+| HA health reports from `run`: service unit, port, health API, standby's probe of the primary, GPUs | ✅ implemented — the framework judges, see [plan/protocol.md](../plan/protocol.md) 2.8 |
+| HA replication status (DRBD 9, `drbdsetup status --json`) | ✅ implemented — read-only, one volume and one peer per resource, see [plan/ha-h0.md](../plan/ha-h0.md) |
 | Local identity and enrolment (`status`) | ✅ implemented |
-| Backup ↔ framework: job queue (claim, progress, result) | ❌ not implemented — see [plan/protocol.md](../plan/protocol.md) |
+| Framework job queue from `run` (claim, progress, result), one runner per job kind | ✅ implemented — backup, replication setup and teardown; a switch job is claimed and reported failed until its runner exists, see [plan/protocol.md](../plan/protocol.md) 3.4 |
+| HA replication setup and teardown (DRBD 9 resource file, metadata, `drbd@<resource>.target`, first promotion, format, mount and service units) | ✅ implemented — each step only when not already so; new, empty disks only, see [plan/protocol.md](../plan/protocol.md) 3.5 |
+| Inventory of data disks (whole, unpartitioned, unmounted, by their `/dev/disk/by-id` link) | ✅ implemented — what `aiha-framework ha create` is given |
 | Container backup (Velero) | 🔌 interface only |
 
 `extract` unpacks an archive into a directory and nothing more. It does not
@@ -55,7 +59,10 @@ pkg/agent/
                         and the progress/result report client
   restore/              restore executor: manifest → mkfs → mountall →
                         rclone | tar → reconfigure → grub in arch-chroot
-  framework/            southbound client: enrol, wait for work
+  framework/            southbound client: enrol, wait for work, report
+  ha/health/            HA health measurements: unit, port, health API, probe, GPUs
+  ha/drbd/              DRBD replication state (role, link, disks, out of sync)
+  ha/replication/       replication setup and teardown on this node
   transport/            pinned-TLS HTTP client (shared with rescue)
   state/                agent-local state (/var/lib/aiha)
 pkg/backup/
@@ -209,6 +216,23 @@ restarting — 10 re-enrolment needed, 11 awaiting boot verification, 12
 configuration — and the systemd unit excludes them from automatic restart. A
 framework that is merely unreachable is not one of them: the agent backs off and
 retries in-process.
+
+## Replication (HA)
+
+An HA group's replication is set up from the framework (`aiha-framework ha setup`):
+the agent receives a job per node and configures DRBD there, so nobody logs in to
+the nodes. The node needs DRBD 9 from LINBIT (`drbd-dkms`, `drbd-utils`,
+[plan/ha-h0.md](../plan/ha-h0.md) section 1); Secure Boot is always disabled, as for
+backup and restore. `drbd.service` is disabled when `drbd-utils` is installed; leave
+it so. Each resource is brought up by its own `drbd@<resource>.target`, and setup
+refuses a node where `drbd.service` has been enabled, since it waits for every peer
+at boot without a limit.
+
+Setup writes `/etc/drbd.d/<resource>.res` (mode 0600, it holds the shared secret,
+and backups leave it out), a mount unit for the volume and a drop-in that makes the
+service require it, and disables the service at boot. It formats only a volume with
+nothing on it and writes metadata only to a blank disk; anything else is refused.
+Teardown removes those files and leaves the data and the metadata on the disk.
 
 ## Agent-local state
 

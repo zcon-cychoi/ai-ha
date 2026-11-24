@@ -82,7 +82,7 @@ func (h *mgmtHandler) RestGetJob(c echo.Context) error {
 // RestPostJobCancel godoc
 // @ID PostJobCancel
 // @Summary Ask a job to stop
-// @Description A job still queued is cancelled at once (200). A job an agent is running is only marked (202): the agent learns of it on its next report and has to confirm it stopped, and until then the job stays cancelling. Repeating a cancel is safe. A job that already ended any other way is refused.
+// @Description A job still queued is cancelled at once (200). A job an agent is running is only marked (202): the agent learns of it on its next report and has to confirm it stopped, and until then the job stays cancelling. Repeating a cancel is safe. A job that already ended any other way is refused, and so is an HA job (409): it ends with its HA operation.
 // @Tags [Protection] Job Management
 // @Produce json
 // @Param jobId path string true "Job ID"
@@ -98,6 +98,9 @@ func (h *mgmtHandler) RestPostJobCancel(c echo.Context) error {
 	j, err := h.jobs.RequestCancel(c.Request().Context(), c.Param("jobId"))
 	if errors.Is(err, job.ErrJobNotFound) {
 		return refuse(c, nil, http.StatusNotFound, model.CodeNotFound, "Job not found")
+	}
+	if errors.Is(err, job.ErrNotCancellable) {
+		return refuse(c, nil, http.StatusConflict, model.CodeConflict, "HA jobs end with their HA operation: they cannot be cancelled on their own")
 	}
 	if err != nil {
 		return refuse(c, err, http.StatusInternalServerError, model.CodeInternal, "Job could not be cancelled")

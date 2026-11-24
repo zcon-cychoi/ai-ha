@@ -285,6 +285,11 @@ func judge(p *Partition, isPrimary bool) {
 		// whose filesystem is mounted nowhere in full. The wording holds for
 		// both, and claims nothing about a mount the list may not contain.
 		p.Reason = "a bind mount rather than a filesystem of its own"
+	case strings.HasPrefix(p.DevNo, drbdMajor+":"):
+		// A replicated volume is the HA group's to protect. Captured here it
+		// would be read through the primary only, and restoring it would put
+		// back a volume whose other half has moved on.
+		p.Reason = "a replicated (DRBD) volume, which its HA group protects rather than backups"
 	case p.FSType == "btrfs":
 		p.Reason = "btrfs subvolumes are not captured yet"
 	case !backupableFSTypes[p.FSType]:
@@ -293,6 +298,98 @@ func judge(p *Partition, isPrimary bool) {
 		p.Candidate = true
 		p.Selectable = true
 	}
+}
+
+// drbdMajor is the block device major number the kernel gives DRBD devices.
+// It is DRBD's own, fixed one; the device's name is the operator's to choose.
+const drbdMajor = "147"
+
+// DataDisk is a whole disk that holds no partition and is not mounted: what a
+// replicated volume can be set up on.
+type DataDisk struct {
+	// Device is the kernel's current name, for reading only: it can name
+	// another disk after the next boot.
+	Device string
+	// ByIDPath is the disk's shortest /dev/disk/by-id link, as lsblk picks
+	// it, or empty when it has none. This is the name a volume is configured
+	// with.
+	ByIDPath  string
+	SizeBytes *int64
+	// Signature is what blkid found on the disk, empty for a blank one.
+	Signature string
+}
+
+// DataDisks lists the whole disks of info that hold no partition and are not
+// mounted. A disk under a replicated device is listed: the replicated device
+// is what sits on it, not a partition.
+//
+// It reads lsblk's output only. Without it the list is empty, which reads as
+// "no spare disk" — the cost of a missing enrichment, as for partitions.
+func DataDisks(info *SystemInfo) []DataDisk {
+	if info == nil || len(info.BlockDevices) == 0 {
+		return nil
+	}
+	var doc struct {
+		BlockDevices []lsblkDisk `json:"blockdevices"`
+	}
+	if err := json.Unmarshal(info.BlockDevices, &doc); err != nil {
+		return nil
+	}
+	var out []DataDisk
+	for _, d := range doc.BlockDevices {
+		if d.Type != "disk" || d.mounted() || !d.onlyReplicatedChildren() {
+			continue
+		}
+		disk := DataDisk{Device: d.Path, SizeBytes: d.Size.value(), Signature: d.FSType}
+		if disk.Device == "" && d.Name != "" {
+			disk.Device = filepath.Join("/dev", d.Name)
+		}
+		if d.IDLink != "" {
+			disk.ByIDPath = "/dev/disk/by-id/" + d.IDLink
+		}
+		out = append(out, disk)
+	}
+	return out
+}
+
+// lsblkDisk is the part of lsblk's output a data disk is read from.
+type lsblkDisk struct {
+	Name   string      `json:"name"`
+	Path   string      `json:"path"`
+	Type   string      `json:"type"`
+	Size   lsblkNumber `json:"size"`
+	FSType string      `json:"fstype"`
+	// IDLink is lsblk's ID-LINK column, from util-linux 2.39.
+	IDLink string `json:"id-link"`
+	// Mountpoints is the column from util-linux 2.37; Mountpoint is the one
+	// before it. Either may be present.
+	Mountpoints []*string   `json:"mountpoints"`
+	Mountpoint  *string     `json:"mountpoint"`
+	Children    []lsblkDisk `json:"children"`
+}
+
+func (d lsblkDisk) mounted() bool {
+	if d.Mountpoint != nil && *d.Mountpoint != "" {
+		return true
+	}
+	for _, m := range d.Mountpoints {
+		if m != nil && *m != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// onlyReplicatedChildren reports a disk whose children, if any, are
+// replicated devices. A partition, a volume group or an encrypted device on
+// it is somebody's data.
+func (d lsblkDisk) onlyReplicatedChildren() bool {
+	for _, c := range d.Children {
+		if !strings.HasPrefix(c.Name, "drbd") {
+			return false
+		}
+	}
+	return true
 }
 
 // agentMountPrefix mirrors source.MountPrefix, the temporary bind mounts a

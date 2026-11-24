@@ -20,7 +20,7 @@ import (
 // RestPostSystemBackup godoc
 // @ID PostSystemBackup
 // @Summary Request a backup of a system
-// @Description Queue a backup job for the system's agent and return at once: follow the job at the address in the Location header. With no devices the partitions are chosen from what the agent reported; a system whose report is missing or incomplete is refused, because a set chosen from it could leave out a filesystem the system needs, and only the restore would show it. Named devices are checked against the same report. If there is no report yet they are accepted unchecked, with a warning, and the agent checks them before it writes. Requests are not deduplicated yet: repeating one queues another job.
+// @Description Queue a backup job for the system's agent and return at once: follow the job at the address in the Location header. With no devices the partitions are chosen from what the agent reported; a system whose report is missing or incomplete is refused, because a set chosen from it could leave out a filesystem the system needs, and only the restore would show it. Named devices are checked against the same report. If there is no report yet they are accepted unchecked, with a warning, and the agent checks them before it writes. A system taking part in an HA operation is refused (409) until the operation ends. Requests are not deduplicated yet: repeating one queues another job.
 // @Tags [Protection] Backup Management
 // @Accept json
 // @Produce json
@@ -77,6 +77,8 @@ func (h *mgmtHandler) RestPostSystemBackup(c echo.Context) error {
 		return refuse(c, nil, http.StatusBadRequest, model.CodeRepositoryNotFound, "Repository not found")
 	case errors.Is(err, job.ErrInvalidRequest):
 		return refuse(c, err, http.StatusBadRequest, model.CodeInvalidRequest, "Backup request rejected: check the devices and repository")
+	case errors.Is(err, job.ErrSystemInFlow):
+		return refuse(c, err, http.StatusConflict, model.CodeConflict, "System is in an HA operation: back it up once the operation ends")
 	case err != nil:
 		return refuse(c, err, http.StatusInternalServerError, model.CodeInternal, "Backup could not be queued")
 	}

@@ -18,7 +18,7 @@ func identityOf(c echo.Context) job.Identity {
 // RestPostAgentJobClaim godoc
 // @ID PostAgentJobClaim
 // @Summary Claim a job
-// @Description Take a job handed out by the long poll. Work must not start until this succeeds: two agents can be handed the same job and only the claim decides between them. Retrying with the same request key before any progress is reported returns the same attempt with a new lease token, since the first response was evidently lost. The response carries the repository the job writes to, credentials included, decrypted for this response; if it cannot be opened the claim is not recorded and may be retried.
+// @Description Take a job handed out by the long poll. Work must not start until this succeeds: two agents can be handed the same job and only the claim decides between them. Retrying with the same request key before any progress is reported returns the same attempt with a new lease token, since the first response was evidently lost. The response names the job's kind and carries what that kind needs, decrypted for this response: for a backup, the repository it writes to with its credentials; for an HA job, the replication secret when its step needs one. If either cannot be opened the claim is not recorded and may be retried. An HA job whose HA operation has moved on is refused (409) and ended, since it can never run.
 // @Tags [Agent] Jobs
 // @Accept json
 // @Produce json
@@ -55,19 +55,21 @@ func (h *agentHandler) RestPostAgentJobClaim(c echo.Context) error {
 		Str("agentId", agentIDOf(c)).Msg("Job claimed")
 	return c.JSON(http.StatusOK, model.AgentJobClaimResp{
 		JobID:                   claimed.Job.JobID,
+		Kind:                    string(claimed.Job.Kind),
 		AttemptID:               claimed.Attempt.AttemptID,
 		LeaseToken:              claimed.LeaseToken,
 		Spec:                    claimed.Job.Spec,
 		ProgressIntervalSeconds: int(claimed.Timings.ProgressInterval.Seconds()),
 		LeaseSeconds:            int(claimed.Timings.LeaseTTL.Seconds()),
 		Repository:              claimed.Repository,
+		Replication:             claimed.Replication,
 	})
 }
 
 // RestPostAgentJobProgress godoc
 // @ID PostAgentJobProgress
 // @Summary Report progress on a job
-// @Description Report on a running attempt and renew its lease. Send this periodically whether or not the work advanced: it is what keeps the lease alive. A cancel request travels back on the response, as there is no other path to an agent.
+// @Description Report on a running attempt and renew its lease. Send this periodically whether or not the work advanced: it is what keeps the lease alive. A cancel request travels back on the response, as there is no other path to an agent. The first report of an HA job asks to start it, and is refused (409) when its HA operation has moved on since the claim; the job is then ended and nothing may be done for it.
 // @Tags [Agent] Jobs
 // @Accept json
 // @Produce json
@@ -183,6 +185,8 @@ func jobStatusFor(err error) (int, string) {
 		return http.StatusConflict, "A different result was already recorded for this attempt"
 	case errors.Is(err, job.ErrLegacyJob):
 		return http.StatusConflict, "Job names no repository: create it again"
+	case errors.Is(err, job.ErrFlowMoved):
+		return http.StatusConflict, "Job belongs to an HA operation that has moved on: do not run it"
 	default:
 		return http.StatusInternalServerError, "Job request failed"
 	}

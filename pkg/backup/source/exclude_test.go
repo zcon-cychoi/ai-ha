@@ -147,8 +147,8 @@ func TestExcludesFollowsAConfiguredAgentStateDir(t *testing.T) {
 
 	// And the manifest must name the path that was actually excluded.
 	declared := src.ExcludedPaths()
-	if len(declared) != 1 || declared[0] != "/opt/aiha/state" {
-		t.Fatalf("ExcludedPaths() = %v, want [/opt/aiha/state]", declared)
+	if len(declared) != 2 || declared[0] != "/opt/aiha/state" || declared[1] != ReplicationResourceFiles {
+		t.Fatalf("ExcludedPaths() = %v, want [/opt/aiha/state %s]", declared, ReplicationResourceFiles)
 	}
 }
 
@@ -158,9 +158,26 @@ func TestExcludesDefaultsToTheAgentStateDir(t *testing.T) {
 	src := &PartitionSource{}
 
 	assertMatches(t, src.Excludes(root), []string{"var/lib/aiha/agent-token"})
-	if declared := src.ExcludedPaths(); len(declared) != 1 || declared[0] != DefaultAgentStateDir {
-		t.Fatalf("ExcludedPaths() = %v, want [%s]", declared, DefaultAgentStateDir)
+	if declared := src.ExcludedPaths(); len(declared) != 2 || declared[0] != DefaultAgentStateDir {
+		t.Fatalf("ExcludedPaths() = %v, want [%s %s]", declared, DefaultAgentStateDir, ReplicationResourceFiles)
 	}
+}
+
+// A replication resource file holds the HA group's shared secret. An archive
+// carrying it would hand the secret to wherever the archive goes, and to a
+// restored system that is not one of the pair.
+func TestExcludesOmitsReplicationResourceFilesFromAnOSRoot(t *testing.T) {
+	patterns := (&PartitionSource{}).Excludes(makeRootTree(t))
+
+	assertMatches(t, patterns, []string{"etc/drbd.d/aiha-6a7b8c9d.res", "etc/drbd.d/r0.res"})
+	// The directory and the tool's own configuration stay: they hold no
+	// secret, and a restored system that replicates again needs them.
+	assertNoMatch(t, patterns, []string{
+		"etc/drbd.d", "etc/drbd.d/global_common.conf", "etc/drbd.conf", "etc/drbd.d/sub/x.res",
+	})
+
+	plain := t.TempDir()
+	assertNoMatch(t, (&PartitionSource{}).Excludes(plain), []string{"etc/drbd.d/r0.res"})
 }
 
 // A backup of an arbitrary directory must not silently drop a path that merely

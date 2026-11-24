@@ -178,6 +178,87 @@ func TestPGMigrateIsRepeatable(t *testing.T) {
 	}
 }
 
+// A table made before progress reporting, and while jobs still carried their
+// repository's access in a column of their own, is brought up to date: every
+// reporting column added with its default, repository_id added, the old
+// column dropped, the existing row kept. Run again, nothing changes.
+func TestPGMigrateUpgradesAnOlderTable(t *testing.T) {
+	dsn := os.Getenv("AIHA_TEST_DB_DSN")
+	if dsn == "" {
+		t.Skip("AIHA_TEST_DB_DSN not set")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	schema := fmt.Sprintf("restore_migrate_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`) })
+
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	if _, err := pool.Exec(ctx, `
+CREATE TABLE restore_jobs (
+    restore_id            text        PRIMARY KEY,
+    recovery_id           text        NOT NULL UNIQUE,
+    claim_token_hash      bytea       NOT NULL,
+    claim_expires_at      timestamptz NOT NULL,
+    status                text        NOT NULL,
+    plan                  jsonb       NOT NULL,
+    repository            jsonb,
+    claim_request_key     text,
+    claimed_at            timestamptz,
+    redelivery_expires_at timestamptz,
+    created_at            timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO restore_jobs (restore_id, recovery_id, claim_token_hash, claim_expires_at, status, plan, repository)
+VALUES ('old', 'rec-old', '\x00', now(), 'pending', '{}', '{"secretKey":"plaintext"}');`); err != nil {
+		t.Fatalf("create the older table: %v", err)
+	}
+
+	for range 3 {
+		if err := Migrate(ctx, pool); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+	}
+
+	var (
+		step, totalSteps   int
+		processed, lastSeq int64
+		repositoryID       *string
+	)
+	if err := pool.QueryRow(ctx, `
+SELECT step, total_steps, processed_bytes, last_seq, repository_id FROM restore_jobs WHERE restore_id = 'old'`).Scan(
+		&step, &totalSteps, &processed, &lastSeq, &repositoryID); err != nil {
+		t.Fatalf("read the existing row: %v", err)
+	}
+	if step != 0 || totalSteps != 0 || processed != 0 || lastSeq != 0 || repositoryID != nil {
+		t.Errorf("existing row = %d %d %d %d %v", step, totalSteps, processed, lastSeq, repositoryID)
+	}
+	var stillThere bool
+	if err := pool.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'restore_jobs' AND column_name = 'repository')`).Scan(&stillThere); err != nil {
+		t.Fatal(err)
+	}
+	if stillThere {
+		t.Error("the plaintext repository column was kept")
+	}
+}
+
 func TestPGReportsRoundTrip(t *testing.T) {
 	s, pool := testPGService(t, testTTL, testRedelivery)
 	created := createPGJob(t, s, pool)

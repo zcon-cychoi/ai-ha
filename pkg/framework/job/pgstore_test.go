@@ -30,6 +30,10 @@ func testTimings() Timings {
 	return Timings{ProgressInterval: 10 * time.Second, LeaseTTL: 90 * time.Second}
 }
 
+func testTTLs() TTLs {
+	return TTLs{Backup: time.Hour, HA: 5 * time.Minute}
+}
+
 const testRepoID = "0123456789abcdef"
 
 // fakeRepos stands in for the repository registry. failAccess makes Access
@@ -96,7 +100,7 @@ func testServiceWithRepos(t *testing.T) (*Service, *PGStore, *pgxpool.Pool, *fak
 	}
 	store := NewPGStore(pool)
 	repos := &fakeRepos{}
-	return NewService(store, repos, time.Hour, 5*time.Minute, testTimings()), store, pool, repos
+	return NewService(store, repos, nil, testTTLs(), 5*time.Minute, testTimings()), store, pool, repos
 }
 
 func identity() Identity {

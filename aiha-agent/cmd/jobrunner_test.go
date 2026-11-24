@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cloud-barista/ai-ha/pkg/agent/worker"
 	apimodel "github.com/cloud-barista/ai-ha/pkg/api/rest/model"
 	"github.com/cloud-barista/ai-ha/pkg/backup/repository"
 )
@@ -64,7 +65,7 @@ func TestS3Target(t *testing.T) {
 func TestBackupRunnerRefusesAJobWithoutARepository(t *testing.T) {
 	spec, _ := json.Marshal(apimodel.BackupJobSpec{Devices: []string{"/dev/sda1"}, RepositoryID: "0123456789abcdef"})
 	var progress atomic.Int64
-	_, err := backupRunner{}.Run(context.Background(), "job-1", spec, apimodel.RepositoryAccess{}, &progress)
+	_, err := backupRunner{}.Run(context.Background(), worker.Job{ID: "job-1", Kind: apimodel.JobKindBackup, Spec: spec}, &progress)
 	if err == nil || !strings.Contains(err.Error(), "no repository") {
 		t.Fatalf("err = %v, want a missing-repository refusal", err)
 	}

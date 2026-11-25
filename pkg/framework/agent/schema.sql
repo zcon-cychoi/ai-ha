@@ -1,5 +1,12 @@
--- Agent enrollment. Applied at startup; creates the tables only when they are
--- absent and does not alter existing ones.
+-- Agent enrollment. Applied by every command that opens the database: creates
+-- the tables and their indexes only when they are absent and does not alter
+-- existing ones.
+--
+-- The indexes are created only when the catalog lacks them, not left to
+-- "CREATE INDEX IF NOT EXISTS", which locks the table against writes before it
+-- finds the index there. The whole file runs as one transaction while the
+-- server may be enrolling agents and recording their polls, and that lock
+-- would hold them up.
 
 -- Tokens an operator issues to let one (or a few) agents enrol. They authorize
 -- enrolment and nothing else: an agent cannot use one to receive work, and an
@@ -39,8 +46,15 @@ CREATE TABLE IF NOT EXISTS agents (
     revoked_at            timestamptz
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS agents_registration_key
-    ON agents (registration_token_id, registration_key)
-    WHERE registration_key IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS agents_system_id ON agents (system_id);
+DO $$
+BEGIN
+    IF to_regclass('agents_registration_key') IS NULL THEN
+        CREATE UNIQUE INDEX agents_registration_key
+            ON agents (registration_token_id, registration_key)
+            WHERE registration_key IS NOT NULL;
+    END IF;
+    IF to_regclass('agents_system_id') IS NULL THEN
+        CREATE INDEX agents_system_id ON agents (system_id);
+    END IF;
+END
+$$;

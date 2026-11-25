@@ -471,3 +471,69 @@ func TestPartitionsKeepsABindMountOfAnUnlistedFilesystem(t *testing.T) {
 		t.Errorf("Reason = %q, but that filesystem is not in the list", p.Reason)
 	}
 }
+
+// A replicated volume is mounted like any other filesystem, but it is the HA
+// group's to protect. It is listed and explained, not offered for backup.
+func TestPartitionsExplainsAReplicatedVolume(t *testing.T) {
+	const mountinfo = `28 1 259:1 / / rw,relatime shared:1 - ext4 /dev/root rw
+120 28 147:0 / /data rw,relatime shared:80 - ext4 /dev/drbd0 rw
+`
+	info := &SystemInfo{Mounts: mountsFrom(t, mountinfo)}
+	parts, err := Partitions(info, fakeResolver{"259:1": "/dev/nvme0n1p1", "147:0": "/dev/drbd0"})
+	if err != nil {
+		t.Fatalf("Partitions: %v", err)
+	}
+	p, ok := byMountPoint(parts)["/data"]
+	if !ok {
+		t.Fatal("/data is missing; it should be listed and explained")
+	}
+	if p.Candidate || p.Selectable || !strings.Contains(p.Reason, "replicated (DRBD) volume") {
+		t.Errorf("/data = %+v", p)
+	}
+	if root := byMountPoint(parts)["/"]; !root.Candidate {
+		t.Errorf("the root partition is no longer a candidate: %+v", root)
+	}
+}
+
+// The data disks are what "ha create" is given. They are whole disks with no
+// partition and no mount, named by their by-id link. A disk already under a
+// replicated device is still one, and says what it holds.
+func TestDataDisks(t *testing.T) {
+	const lsblk = `{"blockdevices":[
+  {"name":"nvme0n1","path":"/dev/nvme0n1","type":"disk","size":8589934592,"id-link":"nvme-Amazon_Elastic_Block_Store_vol0root",
+   "mountpoints":[null],"children":[
+    {"name":"nvme0n1p1","path":"/dev/nvme0n1p1","type":"part","size":8000000000,"fstype":"ext4","mountpoints":["/"]}]},
+  {"name":"nvme1n1","path":"/dev/nvme1n1","type":"disk","size":8589934592,"id-link":"nvme-Amazon_Elastic_Block_Store_vol0aaa",
+   "fstype":null,"mountpoints":[null]},
+  {"name":"nvme2n1","path":"/dev/nvme2n1","type":"disk","size":"17179869184","id-link":"nvme-Amazon_Elastic_Block_Store_vol0bbb",
+   "fstype":"drbd","mountpoints":[null],"children":[
+    {"name":"drbd0","path":"/dev/drbd0","type":"disk","size":17179000000,"fstype":"ext4","mountpoints":["/data"]}]},
+  {"name":"nvme3n1","path":"/dev/nvme3n1","type":"disk","size":1073741824,"fstype":"ext4","mountpoints":["/srv"]},
+  {"name":"sr0","path":"/dev/sr0","type":"rom","size":1073741824,"mountpoints":[null]},
+  {"name":"zram0","path":"/dev/zram0","type":"disk","size":1073741824,"mountpoints":["[SWAP]"]},
+  {"name":"sdb","type":"disk","size":1073741824,"mountpoint":null,"children":[
+    {"name":"vg-lv","type":"lvm","size":1073741824}]}
+]}`
+	got := DataDisks(&SystemInfo{BlockDevices: json.RawMessage(lsblk)})
+
+	byDevice := map[string]DataDisk{}
+	for _, d := range got {
+		byDevice[d.Device] = d
+	}
+	if len(got) != 2 {
+		t.Fatalf("data disks = %+v, want nvme1n1 and nvme2n1", got)
+	}
+	blank := byDevice["/dev/nvme1n1"]
+	if blank.ByIDPath != "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0aaa" || blank.Signature != "" ||
+		blank.SizeBytes == nil || *blank.SizeBytes != 8589934592 {
+		t.Errorf("blank disk = %+v", blank)
+	}
+	replicated := byDevice["/dev/nvme2n1"]
+	if replicated.Signature != "drbd" || replicated.SizeBytes == nil || *replicated.SizeBytes != 17179869184 {
+		t.Errorf("replicated disk = %+v", replicated)
+	}
+
+	if DataDisks(&SystemInfo{}) != nil || DataDisks(&SystemInfo{BlockDevices: json.RawMessage(`{`)}) != nil {
+		t.Error("no usable lsblk output should give no data disks")
+	}
+}

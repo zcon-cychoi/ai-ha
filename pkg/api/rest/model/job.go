@@ -5,6 +5,21 @@ import (
 	"time"
 )
 
+// Job kinds. They are the contract between the framework, which creates a job,
+// and the agent, which picks the runner for it by kind.
+const (
+	// JobKindBackup captures partitions into a backup set.
+	JobKindBackup = "backup"
+
+	// The HA kinds (TM-AI-HA-02 table 4-6, and the rejoin that table lacks).
+	// Only an HA flow creates them, one per step and node.
+	JobKindReplicationSetup    = "replication-setup"
+	JobKindReplicationTeardown = "replication-teardown"
+	JobKindHADemote            = "ha-demote"
+	JobKindHAPromote           = "ha-promote"
+	JobKindHARejoin            = "ha-rejoin"
+)
+
 // JobInfo is a job as a caller follows it.
 type JobInfo struct {
 	JobID    string `json:"jobId"    example:"5e6f70819a0b1c2d"`

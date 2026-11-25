@@ -11,6 +11,7 @@ import (
 
 	"github.com/cloud-barista/ai-ha/pkg/api/rest/model"
 	"github.com/cloud-barista/ai-ha/pkg/framework/agent"
+	"github.com/cloud-barista/ai-ha/pkg/framework/ha"
 	"github.com/cloud-barista/ai-ha/pkg/framework/inventory"
 	"github.com/cloud-barista/ai-ha/pkg/framework/job"
 	"github.com/cloud-barista/ai-ha/pkg/framework/repository"
@@ -78,6 +79,9 @@ type Config struct {
 	// their systems are made of. Without it backup targets have to be named by
 	// hand.
 	Inventory *inventory.Service
+	// HA, when set alongside Agent, accepts nodes' health reports and answers
+	// with their HA assignments.
+	HA *ha.Service
 	// Repositories, when set, serves the management of backup repositories.
 	Repositories *repository.Service
 	// AdminAuth, when set, opens the management API. Left nil, that API is not
@@ -210,7 +214,7 @@ func newEcho(cfg Config) *echo.Echo {
 		g.POST("/agent/restore/:recoveryId/boot-verify", RestPostRestoreBootVerify)
 	}
 	if cfg.Agent != nil {
-		h := &agentHandler{svc: cfg.Agent, jobs: cfg.Jobs, inventory: cfg.Inventory}
+		h := &agentHandler{svc: cfg.Agent, jobs: cfg.Jobs, inventory: cfg.Inventory, ha: cfg.HA}
 		auth := agentAuth(cfg.Agent)
 		// Enrolment is the one agent route without a token: it is what issues
 		// one. It is authorized by the registration token in its body.
@@ -224,7 +228,9 @@ func newEcho(cfg Config) *echo.Echo {
 		if cfg.Inventory != nil {
 			g.POST("/agent/inventory", h.RestPostAgentInventory, auth)
 		}
-		g.POST("/agent/health", RestPostAgentHealth, auth)
+		if cfg.HA != nil {
+			g.POST("/agent/health", h.RestPostAgentHealth, auth)
+		}
 	}
 	registerManagementRoutes(g, cfg)
 	return e

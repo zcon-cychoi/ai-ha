@@ -1,5 +1,67 @@
 basePath: /aiha
 definitions:
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.AgentHealthReq:
+    properties:
+      collectedAt:
+        example: "2026-11-09T04:05:06Z"
+        type: string
+      gpu:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAGPUCheck'
+      groupId:
+        example: 6a7b8c9d0e1f2a3b
+        maxLength: 64
+        type: string
+      healthApi:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAHTTPCheck'
+      hostname:
+        description: |-
+          Hostname is the node's current host name, which a restored system may
+          have changed since it enrolled.
+        example: ip-10-0-1-10
+        maxLength: 255
+        type: string
+      peerHealthApi:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAHTTPCheck'
+      peerPort:
+        allOf:
+        - $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAPortCheck'
+        description: |-
+          PeerPort and PeerHealthAPI are the standby's view of the primary's
+          service over the private network. The framework never connects to a
+          node, so this is how it learns the service can be reached from where a
+          switch would move it.
+      port:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAPortCheck'
+      replication:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAReplicationStatus'
+      role:
+        enum:
+        - primary
+        - standby
+        example: primary
+        type: string
+      service:
+        allOf:
+        - $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAUnitCheck'
+        description: Service, Port and HealthAPI are measured on the node itself.
+    required:
+    - collectedAt
+    type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.AgentHealthResp:
+    properties:
+      assigned:
+        description: |-
+          Assigned is false for a system in no HA group. It has nothing to
+          measure and keeps reporting so that it notices when it joins one.
+        example: true
+        type: boolean
+      assignment:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAAssignment'
+      reportIntervalSeconds:
+        description: ReportIntervalSeconds is how long to wait before the next report.
+        example: 30
+        type: integer
+    type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.AgentInfo:
     properties:
       agentId:
@@ -54,6 +116,15 @@ definitions:
           inventory that says so.
         example: true
         type: boolean
+      dataDisks:
+        description: |-
+          DataDisks are the whole disks that hold no partition and are not
+          mounted, which is what a replicated volume is set up on. It lets an
+          operator pick a node's data disk without logging in to the node.
+        items:
+          $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.InventoryDataDisk'
+        maxItems: 64
+        type: array
       firmware:
         example: uefi
         maxLength: 16
@@ -124,6 +195,13 @@ definitions:
       jobId:
         example: 5e6f70819a0b1c2d
         type: string
+      kind:
+        description: |-
+          Kind is what the job asks for: backup or one of the HA kinds. The agent
+          runs it with its runner for that kind, and fails a kind it has none for
+          rather than guessing.
+        example: backup
+        type: string
       leaseSeconds:
         example: 90
         type: integer
@@ -141,12 +219,19 @@ definitions:
           redeploying.
         example: 10
         type: integer
+      replication:
+        allOf:
+        - $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.ReplicationAccess'
+        description: |-
+          Replication is the secret an HA job needs, decrypted for this response
+          in the same way. Absent for a job that needs none.
       repository:
         allOf:
         - $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.RepositoryAccess'
         description: |-
-          Repository is where the job writes, with the credentials to do so. It is
-          sent only in this response and stored nowhere with the job.
+          Repository is where a backup job writes, with the credentials to do so.
+          It is sent only in this response and stored nowhere with the job. Absent
+          for the other kinds.
       spec:
         type: object
     type: object
@@ -443,6 +528,38 @@ definitions:
     required:
     - approvedBy
     type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAAssignedResource:
+    properties:
+      device:
+        example: /dev/drbd0
+        type: string
+      mountPoint:
+        example: /data
+        type: string
+      name:
+        example: r0
+        type: string
+    type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAAssignment:
+    properties:
+      groupId:
+        example: 6a7b8c9d0e1f2a3b
+        type: string
+      probe:
+        allOf:
+        - $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAProbeTarget'
+        description: Probe is set for the standby only.
+      resource:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAAssignedResource'
+      role:
+        description: |-
+          Role is primary or standby. It is the framework's record, which a
+          switch changes; the node's replica role is what the node reports.
+        example: standby
+        type: string
+      service:
+        $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAServiceSpec'
+    type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAEvent:
     properties:
       at:
@@ -498,6 +615,15 @@ definitions:
     - approvedBy
     - confirmFenced
     type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAGPUCheck:
+    properties:
+      count:
+        example: 1
+        type: integer
+      error:
+        maxLength: 1024
+        type: string
+    type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAGroupInfo:
     properties:
       createdAt:
@@ -550,6 +676,14 @@ definitions:
         example: inference-ha
         maxLength: 63
         type: string
+      primaryDisk:
+        description: |-
+          PrimaryDisk and StandbyDisk are each node's data disk, as the
+          /dev/disk/by-id path its inventory reports. A kernel name such as
+          /dev/nvme1n1 is refused: it can name another disk after a reboot.
+        example: /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123
+        maxLength: 4096
+        type: string
       primarySystemId:
         example: 1a2b3c4d5e6f7081
         type: string
@@ -564,16 +698,44 @@ definitions:
         example: 10.0.1.20:8000
         maxLength: 2048
         type: string
+      standbyDisk:
+        example: /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0456
+        maxLength: 4096
+        type: string
       standbySystemId:
         example: 2b3c4d5e6f708192
         type: string
     required:
     - name
+    - primaryDisk
     - primarySystemId
+    - standbyDisk
     - standbySystemId
+    type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAHTTPCheck:
+    properties:
+      error:
+        maxLength: 1024
+        type: string
+      latencyMs:
+        example: 35
+        type: integer
+      statusCode:
+        description: StatusCode is zero when no response arrived; Error then says
+          why.
+        example: 200
+        type: integer
+      url:
+        example: http://127.0.0.1:8000/healthz
+        maxLength: 2400
+        type: string
     type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.HANodeStatus:
     properties:
+      disk:
+        description: Disk is the node's data disk.
+        example: /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123
+        type: string
       gpusSeen:
         example: 1
         type: integer
@@ -601,33 +763,88 @@ definitions:
         example: 1a2b3c4d5e6f7081
         type: string
     type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAPortCheck:
+    properties:
+      address:
+        example: 127.0.0.1:8000
+        maxLength: 300
+        type: string
+      error:
+        maxLength: 1024
+        type: string
+      open:
+        example: true
+        type: boolean
+    type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAProbeTarget:
+    properties:
+      address:
+        example: 10.0.1.10
+        type: string
+      healthPath:
+        example: /healthz
+        type: string
+      port:
+        example: 8000
+        type: integer
+    type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAReplicationStatus:
     properties:
       connection:
+        description: |-
+          Connection is the link to the peer: Connected, Connecting, StandAlone
+          and so on. DRBD 8.4 folds a running resynchronization into it
+          (SyncSource, SyncTarget); DRBD 9 reports that separately, in Sync.
         example: Connected
+        maxLength: 32
         type: string
       disk:
+        description: |-
+          Disk and PeerDisk are this node's and its peer's data: UpToDate,
+          Inconsistent, Outdated and so on.
         example: UpToDate
+        maxLength: 32
         type: string
       error:
+        description: |-
+          Error says why the status could not be read. The other fields are then
+          not meaningful.
+        maxLength: 1024
         type: string
       outOfSyncBytes:
+        description: |-
+          OutOfSyncBytes is how much this node knows to differ from its peer.
+          Absent means it could not be read, which is not the same as nothing
+          being out of sync: the second is what a switch has to confirm.
         example: 0
         type: integer
+      peerDisk:
+        example: UpToDate
+        maxLength: 32
+        type: string
+      peerRole:
+        example: Secondary
+        maxLength: 32
+        type: string
       role:
+        description: |-
+          Role and PeerRole are this node's and its peer's: Primary, Secondary or
+          Unknown.
         example: Primary
+        maxLength: 32
+        type: string
+      sync:
+        example: Established
+        maxLength: 32
         type: string
     type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAResourceSpec:
     properties:
-      backingDisk:
-        example: /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123
-        maxLength: 4096
-        type: string
       device:
         description: |-
-          Device is what the filesystem sits on, and BackingDisk the volume holding
-          the data on each node, as a stable by-id path.
+          Device is what the filesystem sits on. The disk holding the data is
+          each node's own (HAGroupReq), because its by-id name differs between
+          nodes on most clouds.
         example: /dev/drbd0
         maxLength: 4096
         type: string
@@ -648,7 +865,6 @@ definitions:
         minimum: 1
         type: integer
     required:
-    - backingDisk
     - device
     - mountPoint
     - port
@@ -666,6 +882,15 @@ definitions:
         example: /healthz
         maxLength: 2048
         type: string
+      maxHealthLatencyMs:
+        description: |-
+          MaxHealthLatencyMs is how long the health API may take before the
+          group needs attention. It is the framework's judgement, so an agent
+          ignores it; it must stay below HAHealthAPITimeout, after which the call
+          counts as failed rather than slow.
+        example: 1000
+        minimum: 0
+        type: integer
       port:
         example: 8000
         maximum: 65535
@@ -732,6 +957,53 @@ definitions:
         items:
           $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.HATransitionInfo'
         type: array
+    type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.HAUnitCheck:
+    properties:
+      activeState:
+        example: active
+        maxLength: 32
+        type: string
+      error:
+        maxLength: 1024
+        type: string
+      loadState:
+        description: LoadState is "not-found" when the unit does not exist.
+        example: loaded
+        maxLength: 32
+        type: string
+      subState:
+        example: running
+        maxLength: 32
+        type: string
+    type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.InventoryDataDisk:
+    properties:
+      byIdPath:
+        description: |-
+          ByIDPath is the disk's shortest udev link under /dev/disk/by-id, empty
+          when it has none.
+        example: /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123
+        maxLength: 4096
+        type: string
+      device:
+        description: |-
+          Device is the kernel's name for the disk now. It can name another disk
+          after the next boot, so it is for reading only; ByIDPath is what a
+          replicated volume is configured with.
+        example: /dev/nvme1n1
+        maxLength: 4096
+        type: string
+      signature:
+        description: |-
+          Signature is what the disk holds, as blkid names it: empty for a blank
+          disk, "drbd" for one that already carries replication metadata.
+        example: drbd
+        maxLength: 64
+        type: string
+      sizeBytes:
+        example: 8589934592
+        type: integer
     type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.InventoryPartition:
     properties:
@@ -1041,6 +1313,12 @@ definitions:
         maximum: 604800
         minimum: 0
         type: integer
+    type: object
+  github_com_cloud-barista_ai-ha_pkg_api_rest_model.ReplicationAccess:
+    properties:
+      sharedSecret:
+        example: <shared-secret>
+        type: string
     type: object
   github_com_cloud-barista_ai-ha_pkg_api_rest_model.RepositoryAccess:
     properties:
@@ -1485,19 +1763,38 @@ paths:
     post:
       consumes:
       - application/json
-      description: 'Not implemented yet: answers 501. Will take a node''s measurements
-        of its service and replication, and answer with its HA assignment. The system
-        will come from the agent''s token, never from the body.'
+      description: 'Report the calling node''s measurements of its service, GPUs and
+        replication, and receive its HA assignment: the role, what to check and, for
+        the standby, where to probe the primary. The framework judges the measurements;
+        the node only measures. A node in no HA group is answered with assigned false
+        and keeps reporting, so that it notices when it joins one. Measurements are
+        judged only when the group and role they name are the node''s current ones.
+        The system is taken from the agent''s token, never from the body.'
       operationId: PostAgentHealth
+      parameters:
+      - description: Health report
+        in: body
+        name: agentHealthReq
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.AgentHealthReq'
       produces:
       - application/json
       responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.AgentHealthResp'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.SimpleMsg'
         "401":
           description: Unauthorized
           schema:
             $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.SimpleMsg'
-        "501":
-          description: Not Implemented
+        "500":
+          description: Internal Server Error
           schema:
             $ref: '#/definitions/github_com_cloud-barista_ai-ha_pkg_api_rest_model.SimpleMsg'
       security:
@@ -1596,9 +1893,12 @@ paths:
         this succeeds: two agents can be handed the same job and only the claim decides
         between them. Retrying with the same request key before any progress is reported
         returns the same attempt with a new lease token, since the first response
-        was evidently lost. The response carries the repository the job writes to,
-        credentials included, decrypted for this response; if it cannot be opened
-        the claim is not recorded and may be retried.'
+        was evidently lost. The response names the job''s kind and carries what that
+        kind needs, decrypted for this response: for a backup, the repository it writes
+        to with its credentials; for an HA job, the replication secret when its step
+        needs one. If either cannot be opened the claim is not recorded and may be
+        retried. An HA job whose HA operation has moved on is refused (409) and ended,
+        since it can never run.'
       operationId: PostAgentJobClaim
       parameters:
       - description: Job ID
@@ -1654,7 +1954,10 @@ paths:
       - application/json
       description: 'Report on a running attempt and renew its lease. Send this periodically
         whether or not the work advanced: it is what keeps the lease alive. A cancel
-        request travels back on the response, as there is no other path to an agent.'
+        request travels back on the response, as there is no other path to an agent.
+        The first report of an HA job asks to start it, and is refused (409) when
+        its HA operation has moved on since the claim; the job is then ended and nothing
+        may be done for it.'
       operationId: PostAgentJobProgress
       parameters:
       - description: Job ID
@@ -3017,7 +3320,8 @@ paths:
       description: 'A job still queued is cancelled at once (200). A job an agent
         is running is only marked (202): the agent learns of it on its next report
         and has to confirm it stopped, and until then the job stays cancelling. Repeating
-        a cancel is safe. A job that already ended any other way is refused.'
+        a cancel is safe. A job that already ended any other way is refused, and so
+        is an HA job (409): it ends with its HA operation.'
       operationId: PostJobCancel
       parameters:
       - description: Job ID
@@ -3641,7 +3945,9 @@ paths:
         out a filesystem the system needs, and only the restore would show it. Named
         devices are checked against the same report. If there is no report yet they
         are accepted unchecked, with a warning, and the agent checks them before it
-        writes. Requests are not deduplicated yet: repeating one queues another job.'
+        writes. A system taking part in an HA operation is refused (409) until the
+        operation ends. Requests are not deduplicated yet: repeating one queues another
+        job.'
       operationId: PostSystemBackup
       parameters:
       - description: System ID

@@ -28,15 +28,15 @@ type backupRunner struct {
 }
 
 // Run implements worker.Runner.
-func (r backupRunner) Run(ctx context.Context, jobID string, raw json.RawMessage, access apimodel.RepositoryAccess, progress *atomic.Int64) (worker.Outcome, error) {
+func (r backupRunner) Run(ctx context.Context, j worker.Job, progress *atomic.Int64) (worker.Outcome, error) {
 	var spec apimodel.BackupJobSpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
+	if err := json.Unmarshal(j.Spec, &spec); err != nil {
 		return worker.Outcome{}, fmt.Errorf("decode the backup job spec: %w", err)
 	}
 	// The job's repository, never the one configured on this host: the
 	// framework records where it asked the set to go, and a set written
 	// anywhere else could not be found to restore.
-	uri, auth, err := s3Target(access)
+	uri, auth, err := s3Target(j.Repository)
 	if err != nil {
 		return worker.Outcome{}, err
 	}

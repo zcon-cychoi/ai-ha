@@ -64,6 +64,19 @@ type FrameworkConfig struct {
 	JobProgressInterval time.Duration
 	// JobSweepInterval is how often timed-out jobs are moved on.
 	JobSweepInterval time.Duration
+
+	// HAReportInterval is how often HA nodes are told to report their health,
+	// and how often the server evaluates every group on its own, which is
+	// what notices a node that has stopped reporting.
+	HAReportInterval time.Duration
+	// HAStaleAfter is how old a node's last health report may be before the
+	// node counts as silent, and how long a broken replication link or a
+	// failing primary must last before it counts as lasting.
+	HAStaleAfter time.Duration
+	// HAJobTTL is how long an HA job waits for its agent before it is failed.
+	// Short, unlike JobTTL: an HA job is one step of an operation someone is
+	// watching, and one that waits long acts on a state that has moved on.
+	HAJobTTL time.Duration
 }
 
 // LoadFramework reads the framework configuration from environment variables
@@ -83,6 +96,9 @@ func LoadFramework() (*FrameworkConfig, error) {
 	v.SetDefault("job_lease", 90*time.Second)
 	v.SetDefault("job_progress_interval", 10*time.Second)
 	v.SetDefault("job_sweep_interval", 30*time.Second)
+	v.SetDefault("ha_report_interval", 30*time.Second)
+	v.SetDefault("ha_stale_after", 90*time.Second)
+	v.SetDefault("ha_job_ttl", 5*time.Minute)
 
 	certPin, err := transport.ParseCertPin(v.GetString("cert_pin"), "AIHA_FRAMEWORK_CERT_PIN")
 	if err != nil {
@@ -109,6 +125,10 @@ func LoadFramework() (*FrameworkConfig, error) {
 		JobLease:            v.GetDuration("job_lease"),
 		JobProgressInterval: v.GetDuration("job_progress_interval"),
 		JobSweepInterval:    v.GetDuration("job_sweep_interval"),
+
+		HAReportInterval: v.GetDuration("ha_report_interval"),
+		HAStaleAfter:     v.GetDuration("ha_stale_after"),
+		HAJobTTL:         v.GetDuration("ha_job_ttl"),
 	}, nil
 }
 

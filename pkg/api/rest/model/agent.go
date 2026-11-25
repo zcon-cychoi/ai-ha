@@ -116,7 +116,11 @@ type AgentJobClaimReq struct {
 
 // AgentJobClaimResp is the authority to run a job.
 type AgentJobClaimResp struct {
-	JobID     string `json:"jobId"     example:"5e6f70819a0b1c2d"`
+	JobID string `json:"jobId" example:"5e6f70819a0b1c2d"`
+	// Kind is what the job asks for: backup or one of the HA kinds. The agent
+	// runs it with its runner for that kind, and fails a kind it has none for
+	// rather than guessing.
+	Kind      string `json:"kind"      example:"backup"`
 	AttemptID string `json:"attemptId" example:"7a8b9c0d1e2f3a4b"`
 	// LeaseToken proves this attempt is current. Every report carries it. It
 	// is returned only here.
@@ -128,9 +132,13 @@ type AgentJobClaimResp struct {
 	// redeploying.
 	ProgressIntervalSeconds int `json:"progressIntervalSeconds" example:"10"`
 	LeaseSeconds            int `json:"leaseSeconds"            example:"90"`
-	// Repository is where the job writes, with the credentials to do so. It is
-	// sent only in this response and stored nowhere with the job.
-	Repository RepositoryAccess `json:"repository"`
+	// Repository is where a backup job writes, with the credentials to do so.
+	// It is sent only in this response and stored nowhere with the job. Absent
+	// for the other kinds.
+	Repository RepositoryAccess `json:"repository,omitzero"`
+	// Replication is the secret an HA job needs, decrypted for this response
+	// in the same way. Absent for a job that needs none.
+	Replication *ReplicationAccess `json:"replication,omitempty"`
 }
 
 // AgentJobProgressReq reports on a running attempt and renews its lease.
@@ -231,6 +239,10 @@ type AgentInventoryReq struct {
 	OSVersionID   string `json:"osVersionId,omitempty"   validate:"max=64"   example:"24.04"`
 
 	Partitions []InventoryPartition `json:"partitions" validate:"required,min=1,max=128,dive"`
+	// DataDisks are the whole disks that hold no partition and are not
+	// mounted, which is what a replicated volume is set up on. It lets an
+	// operator pick a node's data disk without logging in to the node.
+	DataDisks []InventoryDataDisk `json:"dataDisks,omitempty" validate:"max=64,dive"`
 
 	// Complete is false when the agent could not account for every filesystem
 	// the system needs. Backup targets are not chosen automatically from an
@@ -273,4 +285,19 @@ type InventoryPartition struct {
 	Selectable bool `json:"selectable"`
 	// Reason explains a false in either flag, in an operator's terms.
 	Reason string `json:"reason,omitempty" validate:"max=512"`
+}
+
+// InventoryDataDisk is a whole disk with no partition and no mount.
+type InventoryDataDisk struct {
+	// Device is the kernel's name for the disk now. It can name another disk
+	// after the next boot, so it is for reading only; ByIDPath is what a
+	// replicated volume is configured with.
+	Device string `json:"device" validate:"max=4096" example:"/dev/nvme1n1"`
+	// ByIDPath is the disk's shortest udev link under /dev/disk/by-id, empty
+	// when it has none.
+	ByIDPath  string `json:"byIdPath,omitempty" validate:"max=4096" example:"/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123"`
+	SizeBytes *int64 `json:"sizeBytes,omitempty" example:"8589934592"`
+	// Signature is what the disk holds, as blkid names it: empty for a blank
+	// disk, "drbd" for one that already carries replication metadata.
+	Signature string `json:"signature,omitempty" validate:"max=64" example:"drbd"`
 }

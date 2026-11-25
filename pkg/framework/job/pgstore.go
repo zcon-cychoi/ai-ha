@@ -22,7 +22,9 @@ const (
 	claimKeyIndex   = "attempts_claim_key"
 )
 
-// Migrate creates the job tables if they do not exist.
+// Migrate creates the job tables if they do not exist, and widens the kinds a
+// job may have on tables created before there were more than backups. It is
+// safe to run on every start.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply job schema: %w", err)
@@ -59,9 +61,27 @@ INSERT INTO jobs (job_id, system_id, kind, status, spec, requested_by, expires_a
 VALUES ($1, $2, $3, 'queued', $4, $5, now() + ($6::bigint * interval '1 millisecond'))
 RETURNING ` + jobColumns
 
+// rowQuerier is what an insert needs: a pool, or a transaction a caller holds.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // Insert implements Store.
 func (s *PGStore) Insert(ctx context.Context, j NewJob, ttl time.Duration) (Job, error) {
-	row := s.pool.QueryRow(ctx, insertSQL,
+	return insertJob(ctx, s.pool, j, ttl)
+}
+
+// InsertTx enqueues j inside tx, a transaction the caller holds, so that the
+// job exists only if the caller's own changes commit with it. An HA flow
+// advances a step and creates that step's job this way: done in two
+// transactions, a crash between them would leave a step with no job, or a job
+// for a step the flow never reached. ttl is normally Service.TTL(j.Kind).
+func InsertTx(ctx context.Context, tx pgx.Tx, j NewJob, ttl time.Duration) (Job, error) {
+	return insertJob(ctx, tx, j, ttl)
+}
+
+func insertJob(ctx context.Context, q rowQuerier, j NewJob, ttl time.Duration) (Job, error) {
+	row := q.QueryRow(ctx, insertSQL,
 		j.JobID, j.SystemID, string(j.Kind), []byte(j.Spec), j.RequestedBy, ttl.Milliseconds())
 
 	job, err := scanJob(row)
@@ -352,9 +372,13 @@ func jobStatusFor(o Outcome) Status {
 
 // Get implements Store.
 func (s *PGStore) Get(ctx context.Context, jobID string) (Job, *Attempt, error) {
-	const q = `SELECT ` + jobColumns + ` FROM jobs WHERE job_id = $1`
+	return getJob(ctx, s.pool, jobID)
+}
 
-	job, err := scanJob(s.pool.QueryRow(ctx, q, jobID))
+func getJob(ctx context.Context, q rowQuerier, jobID string) (Job, *Attempt, error) {
+	const jq = `SELECT ` + jobColumns + ` FROM jobs WHERE job_id = $1`
+
+	job, err := scanJob(q.QueryRow(ctx, jq, jobID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Job{}, nil, ErrJobNotFound
 	}
@@ -366,7 +390,7 @@ func (s *PGStore) Get(ctx context.Context, jobID string) (Job, *Attempt, error) 
 	}
 
 	const aq = `SELECT ` + attemptColumns + ` FROM attempts WHERE attempt_id = $1`
-	attempt, err := scanAttempt(s.pool.QueryRow(ctx, aq, job.CurrentAttemptID))
+	attempt, err := scanAttempt(q.QueryRow(ctx, aq, job.CurrentAttemptID))
 	if err != nil {
 		return job, nil, fmt.Errorf("read the current attempt: %w", err)
 	}
@@ -529,6 +553,53 @@ RETURNING ` + jobColumns
 		return Job{}, fmt.Errorf("request cancel: %w", err)
 	}
 	return job, nil
+}
+
+// rejectJobSQL fails a job that has not started. A running job is left
+// alone: its agent may be partway through the work, and only its own result
+// or the sweeper may end it.
+const rejectJobSQL = `
+UPDATE jobs
+   SET status = 'failed', message = $2, finished_at = now()
+ WHERE job_id = $1 AND status IN ('queued', 'claimed')
+RETURNING current_attempt_id`
+
+// closeRejectedAttemptSQL closes the attempt that claimed a rejected job, so
+// that the agent's next report is refused rather than applied. The outcome is
+// failed, as the job's is: the attempt was refused, not lost.
+const closeRejectedAttemptSQL = `
+UPDATE attempts
+   SET outcome = 'failed', message = $2, finished_at = now()
+ WHERE attempt_id = $1 AND finished_at IS NULL`
+
+// Reject implements Store.
+func (s *PGStore) Reject(ctx context.Context, jobID, message string) error {
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		return rejectJob(ctx, tx, jobID, message)
+	})
+	if err != nil {
+		return fmt.Errorf("reject job %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// rejectJob ends a job that has not started, and the attempt that claimed it,
+// inside tx.
+func rejectJob(ctx context.Context, tx pgx.Tx, jobID, message string) error {
+	var attemptID *string
+	err := tx.QueryRow(ctx, rejectJobSQL, jobID, message).Scan(&attemptID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Started or ended since it was read: not this call's to end.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attemptID == nil {
+		return nil
+	}
+	_, err = tx.Exec(ctx, closeRejectedAttemptSQL, *attemptID, message)
+	return err
 }
 
 // scanner abstracts pgx.Row and pgx.Rows.

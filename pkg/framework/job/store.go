@@ -1,6 +1,6 @@
-// Package job runs the framework's side of the backup job queue: a user asks
-// for work, an agent waits for it, claims it, reports on it and reports how it
-// ended.
+// Package job runs the framework's side of the job queue: a user or an HA flow
+// asks for work, an agent waits for it, claims it, reports on it and reports
+// how it ended.
 //
 // The shape follows one rule that is easy to get wrong. A lease proves which
 // attempt's reports count; it does not stop the previous attempt from still
@@ -15,14 +15,35 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/cloud-barista/ai-ha/pkg/api/rest/model"
 )
 
 // Kind is what a job asks for. Restores have their own path and their own
 // table, because a rescue agent is not an enrolled system.
 type Kind string
 
-// KindBackup is a backup of an enrolled system.
-const KindBackup Kind = "backup"
+const (
+	// KindBackup is a backup of an enrolled system.
+	KindBackup Kind = model.JobKindBackup
+
+	// The HA kinds. An HA flow creates them, one per step and node, and the
+	// queue checks with the flow before an agent may run one (Flows).
+	KindReplicationSetup    Kind = model.JobKindReplicationSetup
+	KindReplicationTeardown Kind = model.JobKindReplicationTeardown
+	KindHADemote            Kind = model.JobKindHADemote
+	KindHAPromote           Kind = model.JobKindHAPromote
+	KindHARejoin            Kind = model.JobKindHARejoin
+)
+
+// HA reports whether k is one of the kinds an HA flow creates.
+func (k Kind) HA() bool {
+	switch k {
+	case KindReplicationSetup, KindReplicationTeardown, KindHADemote, KindHAPromote, KindHARejoin:
+		return true
+	}
+	return false
+}
 
 // Status is where a job is in its lifecycle.
 type Status string
@@ -89,6 +110,18 @@ var (
 	ErrNotOwned = errors.New("job does not belong to this agent")
 	// ErrInvalidRequest reports a job that cannot be accepted as described.
 	ErrInvalidRequest = errors.New("invalid job request")
+	// ErrFlowMoved reports an HA job whose flow is no longer at the step the
+	// job was created for: the flow ended, failed or went on without it. The
+	// job is ended when this is found, before its agent starts anything.
+	ErrFlowMoved = errors.New("the HA operation this job belongs to has moved on")
+	// ErrSystemInFlow reports a backup asked for while the system takes part
+	// in an HA operation, which may be stopping its service or changing which
+	// node holds the data.
+	ErrSystemInFlow = errors.New("the system is taking part in an HA operation")
+	// ErrNotCancellable reports a cancel asked for an HA job. It ends with its
+	// HA operation: stopping one step alone would leave the operation waiting
+	// on a job that never finishes.
+	ErrNotCancellable = errors.New("an HA job cannot be cancelled on its own")
 )
 
 // Job is a unit of work as the framework holds it.
@@ -270,6 +303,11 @@ type Store interface {
 	// outright; a running one is only marked, because stopping it requires the
 	// agent to act.
 	RequestCancel(ctx context.Context, jobID string) (Job, error)
+
+	// Reject fails a job that has not started, with message as the reason,
+	// and closes the attempt that claimed it, if any, so that its agent's next
+	// report is refused. A job that has started or ended is left as it is.
+	Reject(ctx context.Context, jobID, message string) error
 
 	// Sweep applies the timeouts that move jobs nobody is reporting on.
 	Sweep(ctx context.Context, claimedTimeout time.Duration) (SweepCounts, error)

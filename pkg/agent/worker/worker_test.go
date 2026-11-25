@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,7 @@ type fakeFramework struct {
 	mu sync.Mutex
 
 	claimErr   error
+	kind       string // the claimed job's kind; backup when empty
 	interval   int
 	leaseSecs  int
 	cancelAt   int64 // report seq from which cancelRequested is returned
@@ -33,11 +35,18 @@ func (f *fakeFramework) Claim(context.Context, string, string, string) (model.Ag
 		return model.AgentJobClaimResp{}, f.claimErr
 	}
 	return model.AgentJobClaimResp{
-		JobID: "job-1", AttemptID: "attempt-1", LeaseToken: "lease",
+		JobID: "job-1", Kind: f.kindOrBackup(), AttemptID: "attempt-1", LeaseToken: "lease",
 		Spec:                    json.RawMessage(`{}`),
 		ProgressIntervalSeconds: f.interval,
 		LeaseSeconds:            f.leaseSecs,
 	}, nil
+}
+
+func (f *fakeFramework) kindOrBackup() string {
+	if f.kind == "" {
+		return model.JobKindBackup
+	}
+	return f.kind
 }
 
 func (f *fakeFramework) Progress(_ context.Context, _ string, _ string, req model.AgentJobProgressReq) (model.AgentJobProgressResp, error) {
@@ -76,13 +85,13 @@ func (f *fakeFramework) resultList() []model.AgentJobResultReq {
 // runnerFunc adapts a function to Runner.
 type runnerFunc func(ctx context.Context, progress *atomic.Int64) (Outcome, error)
 
-func (r runnerFunc) Run(ctx context.Context, _ string, _ json.RawMessage, _ model.RepositoryAccess, progress *atomic.Int64) (Outcome, error) {
+func (r runnerFunc) Run(ctx context.Context, _ Job, progress *atomic.Int64) (Outcome, error) {
 	return r(ctx, progress)
 }
 
 func newTestWorker(t *testing.T, fw Framework, runner Runner) *Worker {
 	t.Helper()
-	return New(fw, "agent-token", runner, t.TempDir())
+	return New(fw, "agent-token", map[string]Runner{model.JobKindBackup: runner}, t.TempDir())
 }
 
 func testJob() model.AgentJob {
@@ -340,4 +349,67 @@ func TestUnusableTimingsAreRefused(t *testing.T) {
 	if ran.Load() {
 		t.Fatal("work ran under timings that could not keep its lease")
 	}
+}
+
+// A job of a kind this agent has no runner for is claimed and reported failed
+// at once, without a start report: nothing was started, and left unclaimed it
+// would come back on every poll.
+func TestAJobOfAnUnknownKindIsReportedFailedWithoutStarting(t *testing.T) {
+	fw := &fakeFramework{interval: 1, leaseSecs: 3, kind: model.JobKindReplicationSetup}
+	var ran atomic.Bool
+	w := newTestWorker(t, fw, runnerFunc(func(context.Context, *atomic.Int64) (Outcome, error) {
+		ran.Store(true)
+		return Outcome{}, nil
+	}))
+
+	if err := w.Execute(context.Background(), testJob()); err == nil {
+		t.Fatal("a job of an unknown kind was reported as handled")
+	}
+	if ran.Load() {
+		t.Fatal("the backup runner ran a replication-setup job")
+	}
+	if n := fw.reports(); n != 0 {
+		t.Errorf("%d progress report(s) sent: the job was started", n)
+	}
+	results := fw.resultList()
+	if len(results) != 1 || results[0].Outcome != "failed" || !strings.Contains(results[0].Message, model.JobKindReplicationSetup) {
+		t.Fatalf("results = %+v, want one failure naming the kind", results)
+	}
+}
+
+// Each kind goes to its own runner, which receives what the claim carried.
+func TestEachKindGoesToItsOwnRunner(t *testing.T) {
+	fw := &fakeFramework{interval: 1, leaseSecs: 3, kind: model.JobKindHAPromote}
+	var backupRan atomic.Bool
+	var got Job
+	w := New(fw, "agent-token", map[string]Runner{
+		model.JobKindBackup: runnerFunc(func(context.Context, *atomic.Int64) (Outcome, error) {
+			backupRan.Store(true)
+			return Outcome{}, nil
+		}),
+		model.JobKindHAPromote: jobRunnerFunc(func(_ context.Context, j Job) (Outcome, error) {
+			got = j
+			return Outcome{Message: "promoted"}, nil
+		}),
+	}, t.TempDir())
+
+	if err := w.Execute(context.Background(), testJob()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if backupRan.Load() {
+		t.Fatal("the backup runner ran an ha-promote job")
+	}
+	if got.ID != "job-1" || got.Kind != model.JobKindHAPromote || string(got.Spec) != `{}` {
+		t.Errorf("runner received %+v", got)
+	}
+	if results := fw.resultList(); len(results) != 1 || results[0].Outcome != "completed" {
+		t.Fatalf("results = %+v, want one completed", results)
+	}
+}
+
+// jobRunnerFunc adapts a function that wants the job to Runner.
+type jobRunnerFunc func(ctx context.Context, j Job) (Outcome, error)
+
+func (r jobRunnerFunc) Run(ctx context.Context, j Job, _ *atomic.Int64) (Outcome, error) {
+	return r(ctx, j)
 }

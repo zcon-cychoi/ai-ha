@@ -1,0 +1,87 @@
+[
+{
+  "name": "r0",
+  "node-id": 1,
+  "role": "Secondary",
+  "suspended": false,
+  "suspended-user": false,
+  "suspended-no-data": false,
+  "suspended-fencing": false,
+  "suspended-quorum": false,
+  "force-io-failures": false,
+  "write-ordering": "flush",
+  "devices": [
+    {
+      "volume": 0,
+      "minor": 0,
+      "disk-state": "Inconsistent",
+      "client": false,
+      "open": false,
+      "quorum": true,
+      "size": 8388316,
+      "read": 0,
+      "written": 664576,
+      "al-writes": 0,
+      "bm-writes": 71,
+      "upper-pending": 0,
+      "lower-pending": 0
+    } ],
+  "connections": [
+    {
+      "peer-node-id": 0,
+      "name": "ip-10-0-1-83",
+      "connection-state": "Connected", 
+      "congested": false,
+      "peer-role": "Primary",
+      "tls": false,
+      "ap-in-flight": 0,
+      "rs-in-flight": 0,
+      "paths": [
+        {
+          "this_host": {
+            "address": "10.0.1.25",
+            "port": 7789,
+            "family": "ipv4"
+          },
+          "remote_host": {
+            "address": "10.0.1.83",
+            "port": 7789,
+            "family": "ipv4"
+          },
+          "established": true
+        } ],
+      "peer_devices": [
+        {
+          "volume": 0,
+          "replication-state": "SyncTarget",
+          "peer-disk-state": "UpToDate",
+          "peer-client": false,
+          "resync-suspended": "no",
+          "received": 664576,
+          "sent": 0,
+          "out-of-sync": 7723740,
+          "pending": 0,
+          "unacked": 0,
+          "has-sync-details": true,
+          "has-online-verify-details": false,
+          "percent-in-sync": 7.92,
+          "rs-total": 16776632,
+          "rs-dt-start-ms": 7169,
+          "rs-paused-ms": 0,
+          "rs-dt0-ms": 7169,
+          "rs-db0-sectors": 1329152,
+          "rs-dt1-ms": 4156,
+          "rs-db1-sectors": 784384,
+          "rs-failed": 0,
+          "rs-same-csum": 0,
+          "want": 80.00,
+          "db0/dt0 [MiB/s]": 90.53,
+          "db1/dt1 [MiB/s]": 92.16,
+          "estimated-seconds-to-finish": 82,
+          "db/dt [MiB/s]": 90.53,
+          "percent-resync-done": 7.92
+        } ]
+    } ]
+}
+]
+

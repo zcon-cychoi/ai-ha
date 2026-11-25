@@ -50,7 +50,7 @@ there is refused now rather than when an agent picks the job up.`,
 		}
 		defer pool.Close()
 
-		_, jobs, err := newServices(pool, false)
+		_, jobs, _, err := newServices(pool, false)
 		if err != nil {
 			return err
 		}
@@ -90,7 +90,7 @@ var jobListCmd = &cobra.Command{
 		}
 		defer pool.Close()
 
-		_, jobs, err := newServices(pool, false)
+		_, jobs, _, err := newServices(pool, false)
 		if err != nil {
 			return err
 		}
@@ -136,7 +136,7 @@ contact. They call for different responses.`,
 		}
 		defer pool.Close()
 
-		_, jobs, err := newServices(pool, false)
+		_, jobs, _, err := newServices(pool, false)
 		if err != nil {
 			return err
 		}
@@ -199,7 +199,7 @@ stop.`,
 		}
 		defer pool.Close()
 
-		_, jobs, err := newServices(pool, false)
+		_, jobs, _, err := newServices(pool, false)
 		if err != nil {
 			return err
 		}

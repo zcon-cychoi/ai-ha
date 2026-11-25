@@ -8,6 +8,7 @@ import (
 	"github.com/cloud-barista/ai-ha/pkg/api/rest"
 	"github.com/cloud-barista/ai-ha/pkg/api/rest/model"
 	"github.com/cloud-barista/ai-ha/pkg/framework/agent"
+	"github.com/cloud-barista/ai-ha/pkg/framework/ha"
 	"github.com/cloud-barista/ai-ha/pkg/framework/job"
 	"github.com/cloud-barista/ai-ha/pkg/framework/token"
 	"github.com/rs/zerolog/log"
@@ -50,8 +51,9 @@ AIHA_FRAMEWORK_PUBLIC_URL. Agents are served either way.`,
 		defer pool.Close()
 
 		// The key is required here: every claim decrypts its repository's
-		// credentials, and a server that could not would fail each one.
-		repos, jobs, err := newServices(pool, true)
+		// credentials or its HA group's shared secret, and a server that
+		// could not would fail each one.
+		repos, jobs, flows, err := newServices(pool, true)
 		if err != nil {
 			return err
 		}
@@ -59,7 +61,12 @@ AIHA_FRAMEWORK_PUBLIC_URL. Agents are served either way.`,
 		if err != nil {
 			return err
 		}
+		haSvc, err := newHAService(pool)
+		if err != nil {
+			return err
+		}
 		go runSweeper(ctx, jobs, cfg.JobSweepInterval)
+		go runHAEvaluator(ctx, haSvc, flows, cfg.HAReportInterval)
 
 		if cfg.CertPin {
 			log.Info().Str("certSha256", fingerprint).Msg("Serving with the pinned certificate")
@@ -74,6 +81,7 @@ AIHA_FRAMEWORK_PUBLIC_URL. Agents are served either way.`,
 			Agent:           agent.NewService(agent.NewPGStore(pool)),
 			Jobs:            jobs,
 			Inventory:       newInventoryService(pool),
+			HA:              haSvc,
 			Repositories:    repos,
 			AdminAuth:       adminAuth,
 			FrameworkAccess: access,
@@ -145,6 +153,39 @@ func runSweeper(ctx context.Context, jobs *job.Service, interval time.Duration) 
 				Int("runningAbandoned", counts.RunningAbandoned).
 				Int("cancelUnconfirmed", counts.CancelUnconfirmed).
 				Msg("Swept timed-out jobs")
+		}
+	}
+}
+
+// runHAEvaluator moves the HA flows on and evaluates every HA group on its
+// own, until ctx ends.
+//
+// A node that stops reporting sends nothing that could trigger an evaluation,
+// so without this a dead primary would keep its last verdict forever. A flow
+// moves on only here, too: a step's job completing is not enough, the node's
+// next report has to agree, and neither event is the trigger on its own. The
+// flows go first so that a group whose setup just completed is judged in the
+// same round. A failed round is logged and retried on the next tick: the
+// conditions it judges persist until judged.
+func runHAEvaluator(ctx context.Context, svc *ha.Service, flows *ha.FlowService, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		roundCtx, cancel := context.WithTimeout(ctx, interval)
+		if advanced, err := flows.AdvanceAll(roundCtx); err != nil {
+			log.Error().Err(err).Int("advanced", advanced).Msg("HA operations could not all be advanced")
+		}
+		evaluated, err := svc.EvaluateAll(roundCtx)
+		cancel()
+		if err != nil {
+			log.Error().Err(err).Int("evaluated", evaluated).Msg("HA evaluation failed")
 		}
 	}
 }

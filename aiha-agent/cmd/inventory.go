@@ -129,6 +129,14 @@ func inventoryOf(info *sysinfo.SystemInfo, resolve sysinfo.DeviceResolver) (mode
 		Missing:          complete.Missing,
 		IncompleteReason: complete.Reason,
 	}
+	for _, d := range sysinfo.DataDisks(info) {
+		req.DataDisks = append(req.DataDisks, model.InventoryDataDisk{
+			Device:    d.Device,
+			ByIDPath:  d.ByIDPath,
+			SizeBytes: d.SizeBytes,
+			Signature: d.Signature,
+		})
+	}
 	for _, p := range parts {
 		req.Partitions = append(req.Partitions, model.InventoryPartition{
 			Device:      p.Device,

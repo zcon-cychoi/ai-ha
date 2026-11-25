@@ -52,13 +52,26 @@ const resultRetryWindow = 5 * time.Minute
 // finish before it gives up on its claim.
 const workLockTimeout = 10 * time.Second
 
-// Runner does the work a job asks for.
+// Job is a claimed job as its runner receives it.
+type Job struct {
+	ID   string
+	Kind string
+	// Spec is what to do, as the framework created the job.
+	Spec json.RawMessage
+	// Repository is where a backup job writes, with its credentials. Never
+	// log it.
+	Repository model.RepositoryAccess
+	// Replication is the secret an HA job needs, nil when its step needs
+	// none. Never log it.
+	Replication *model.ReplicationAccess
+}
+
+// Runner does the work of one kind of job.
 type Runner interface {
-	// Run performs the work described by spec against repo, the repository
-	// the framework handed out with the job. It must stop promptly when ctx is
+	// Run performs the work job describes. It must stop promptly when ctx is
 	// cancelled and add to progress as it goes, since progress is read
-	// concurrently by the reporter. repo holds credentials: never log it.
-	Run(ctx context.Context, jobID string, spec json.RawMessage, repo model.RepositoryAccess, progress *atomic.Int64) (Outcome, error)
+	// concurrently by the reporter.
+	Run(ctx context.Context, job Job, progress *atomic.Int64) (Outcome, error)
 }
 
 // Outcome is what a runner produced.
@@ -80,19 +93,21 @@ type Framework interface {
 type Worker struct {
 	framework  Framework
 	agentToken string
-	runner     Runner
+	// runners holds the runner for each kind of job this agent runs.
+	runners map[string]Runner
 	// lockPath serialises work on this host, so that a job from the framework
 	// and a backup started by hand cannot run over each other.
 	lockPath string
 }
 
-// New returns a worker. stateDir is where the agent keeps its local state; the
-// work lock lives there.
-func New(fw Framework, agentToken string, runner Runner, stateDir string) *Worker {
+// New returns a worker that runs the kinds of job runners has a runner for.
+// stateDir is where the agent keeps its local state; the work lock lives
+// there.
+func New(fw Framework, agentToken string, runners map[string]Runner, stateDir string) *Worker {
 	return &Worker{
 		framework:  fw,
 		agentToken: agentToken,
-		runner:     runner,
+		runners:    runners,
 		lockPath:   filepath.Join(stateDir, "work.lock"),
 	}
 }
@@ -170,6 +185,11 @@ func (w *Worker) run(ctx context.Context, logger zeroLogger, claimed model.Agent
 		return fmt.Errorf("the framework handed out unusable timings (report every %s, lease %s)", interval, lease)
 	}
 
+	runner, ok := w.runners[claimed.Kind]
+	if !ok {
+		return w.refuseKind(ctx, logger, claimed)
+	}
+
 	r := &reporter{
 		framework: w.framework,
 		token:     w.agentToken,
@@ -206,7 +226,13 @@ func (w *Worker) run(ctx context.Context, logger zeroLogger, claimed model.Agent
 		r.loop(workCtx, cancelWork)
 	}()
 
-	outcome, runErr := w.runner.Run(workCtx, claimed.JobID, claimed.Spec, claimed.Repository, r.progress)
+	outcome, runErr := runner.Run(workCtx, Job{
+		ID:          claimed.JobID,
+		Kind:        claimed.Kind,
+		Spec:        claimed.Spec,
+		Repository:  claimed.Repository,
+		Replication: claimed.Replication,
+	}, r.progress)
 
 	cancelWork()
 	reportWG.Wait()
@@ -255,6 +281,26 @@ func (w *Worker) run(ctx context.Context, logger zeroLogger, claimed model.Agent
 	}
 	logger.Info().Str("outcome", result.Outcome).Msg("Job finished")
 	return runErr
+}
+
+// refuseKind fails a job of a kind this agent has no runner for, such as one
+// a newer framework created for a newer agent. Nothing is started: the result
+// is sent straight after the claim, which the framework accepts for a job
+// that never reported starting. Left unclaimed, the job would come back on
+// every poll until it expired.
+func (w *Worker) refuseKind(ctx context.Context, logger zeroLogger, claimed model.AgentJobClaimResp) error {
+	result := model.AgentJobResultReq{
+		AttemptID:  claimed.AttemptID,
+		LeaseToken: claimed.LeaseToken,
+		Outcome:    "failed",
+		Message:    fmt.Sprintf("This agent does not run %q jobs: upgrade it", claimed.Kind),
+	}
+	if err := w.deliverResult(ctx, claimed.JobID, result); err != nil {
+		logger.Error().Err(err).Str("kind", claimed.Kind).Msg("Could not report a job of unknown kind")
+		return err
+	}
+	logger.Warn().Str("kind", claimed.Kind).Msg("Refused a job of a kind this agent does not run")
+	return fmt.Errorf("job %s is a %q job, which this agent does not run", claimed.JobID, claimed.Kind)
 }
 
 // deliverResult reports the result, retrying while the framework is

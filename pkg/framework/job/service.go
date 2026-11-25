@@ -42,10 +42,44 @@ type Repositories interface {
 	Access(ctx context.Context, id string) (model.RepositoryAccess, error)
 }
 
+// Flows is what the job queue needs from the HA flows that create HA jobs.
+// It is declared here so that this package does not import the HA package.
+//
+// An HA job belongs to one step of one flow. Its spec names the flow and the
+// step; this package does not read it, and leaves judging it to Flows.
+type Flows interface {
+	// InProgress reports whether systemID takes part in an HA flow that has
+	// not ended. Its backups are refused until it has.
+	InProgress(ctx context.Context, systemID string) (bool, error)
+	// Admit is asked when an HA job is claimed, before the claim is recorded.
+	// It returns an error wrapping ErrFlowMoved when the flow is no longer at
+	// the job's step, and otherwise what the agent needs to run the job: the
+	// replication secret, or nil for a step that needs none. Any other error
+	// leaves the job as it was, to be claimed again.
+	Admit(ctx context.Context, j Job) (*model.ReplicationAccess, error)
+	// Current is asked when an HA job's agent reports that it is starting.
+	// It returns an error wrapping ErrFlowMoved when the flow is no longer at
+	// the job's step.
+	Current(ctx context.Context, j Job) error
+}
+
+// TTLs bounds how long a job of each kind waits for its agent.
+type TTLs struct {
+	// Backup is for backup jobs.
+	Backup time.Duration
+	// HA is for every HA kind. It is short: an HA job belongs to one step of
+	// an HA operation, and one that waits long would act on a state the
+	// operator has stopped watching.
+	HA time.Duration
+}
+
 var (
 	// ErrLegacyJob reports a backup job created before jobs named a
 	// repository. It can never run: there is no repository to hand its agent.
 	ErrLegacyJob = errors.New("job predates repository assignment")
+	// errNoFlows reports an HA job on a server running without HA flows. No
+	// such server creates one, so finding one is a fault, not a refusal.
+	errNoFlows = errors.New("this server runs no HA flows")
 	// ErrBackupSetNotFound reports a set the framework has no usable record
 	// of: one taken by hand outside the framework, or a wrong ID. FindBackupSet
 	// also returns it for a set whose backup did not complete.
@@ -58,22 +92,34 @@ var (
 type Service struct {
 	store   Store
 	repos   Repositories
-	jobTTL  time.Duration
+	flows   Flows
+	ttls    TTLs
 	claimed time.Duration
 	timings Timings
 }
 
 // NewService returns a Service over store.
 //
-// jobTTL bounds how long a job waits for an agent; claimedTimeout bounds how
-// long a claimed job may sit before it is returned to the queue. repos
-// resolves the repository each backup job writes to.
-func NewService(store Store, repos Repositories, jobTTL, claimedTimeout time.Duration, t Timings) *Service {
-	return &Service{store: store, repos: repos, jobTTL: jobTTL, claimed: claimedTimeout, timings: t}
+// ttls bound how long a job waits for an agent; claimedTimeout bounds how long
+// a claimed job may sit before it is returned to the queue. repos resolves the
+// repository each backup job writes to, and flows judges HA jobs. flows is nil
+// on a server without HA flows: no system is then in one, and an HA job found
+// in the queue is refused at claim.
+func NewService(store Store, repos Repositories, flows Flows, ttls TTLs, claimedTimeout time.Duration, t Timings) *Service {
+	return &Service{store: store, repos: repos, flows: flows, ttls: ttls, claimed: claimedTimeout, timings: t}
 }
 
 // Timings returns what agents are told about reporting.
 func (s *Service) Timings() Timings { return s.timings }
+
+// TTL returns how long a job of kind k waits for its agent. An HA flow
+// enqueues its jobs with it (InsertTx).
+func (s *Service) TTL(k Kind) time.Duration {
+	if k.HA() {
+		return s.ttls.HA
+	}
+	return s.ttls.Backup
+}
 
 // BackupSpec is what a backup job asks the agent to do. It is the wire
 // contract shared with the agent, so it is defined in the model package.
@@ -116,6 +162,19 @@ func (s *Service) CreateBackup(ctx context.Context, systemID string, spec Backup
 	}
 	spec.RepositoryID = repo.ID
 
+	// An HA operation may be stopping the service or moving the data to the
+	// other node, and a backup taken in the middle would capture neither the
+	// old state nor the new one.
+	if s.flows != nil {
+		busy, err := s.flows.InProgress(ctx, systemID)
+		if err != nil {
+			return Job{}, fmt.Errorf("check the HA operations of system %s: %w", systemID, err)
+		}
+		if busy {
+			return Job{}, fmt.Errorf("%w: %s", ErrSystemInFlow, systemID)
+		}
+	}
+
 	encoded, err := json.Marshal(spec)
 	if err != nil {
 		return Job{}, fmt.Errorf("encode the job spec: %w", err)
@@ -126,7 +185,7 @@ func (s *Service) CreateBackup(ctx context.Context, systemID string, spec Backup
 		Kind:        KindBackup,
 		Spec:        encoded,
 		RequestedBy: requestedBy,
-	}, s.jobTTL)
+	}, s.TTL(KindBackup))
 }
 
 // Waiting returns the job waiting for a system, or ErrJobNotFound.
@@ -146,9 +205,13 @@ type Claimed struct {
 	// here: the store keeps its hash.
 	LeaseToken string
 	Timings    Timings
-	// Repository is where the job writes, with its credentials. It is a
+	// Repository is where a backup job writes, with its credentials. It is a
 	// secret, decrypted for this response and stored nowhere with the job.
+	// Zero for the other kinds.
 	Repository model.RepositoryAccess
+	// Replication is the secret an HA job needs, decrypted in the same way,
+	// or nil when its step needs none.
+	Replication *model.ReplicationAccess
 }
 
 // Claim takes a job on behalf of an agent.
@@ -173,8 +236,10 @@ func (s *Service) Claim(ctx context.Context, agent Identity, jobID, claimRequest
 	// no attempt is created and an existing one is left as it was, so the
 	// agent retries the same claim once the repository can be reached. Done
 	// the other way round, a claim could be recorded for a job whose agent
-	// never received anything to run it with.
-	repo, err := s.repositoryFor(ctx, owned)
+	// never received anything to run it with. The one exception is an HA job
+	// whose flow has moved on, which is ended: it can never run, and left in
+	// the queue it would be handed to its agent on every poll.
+	repo, replication, err := s.accessFor(ctx, owned)
 	if err != nil {
 		return Claimed{}, err
 	}
@@ -200,10 +265,50 @@ func (s *Service) Claim(ctx context.Context, agent Identity, jobID, claimRequest
 		return Claimed{}, ErrNotClaimable
 	}
 
-	return Claimed{Job: job, Attempt: attempt, LeaseToken: leaseToken, Timings: s.timings, Repository: repo}, nil
+	return Claimed{
+		Job: job, Attempt: attempt, LeaseToken: leaseToken, Timings: s.timings,
+		Repository: repo, Replication: replication,
+	}, nil
 }
 
-// repositoryFor returns the repository access a job's agent needs.
+// accessFor returns what a job's agent needs to run it: the repository for a
+// backup, and whatever the HA flow hands out for an HA job.
+func (s *Service) accessFor(ctx context.Context, j Job) (model.RepositoryAccess, *model.ReplicationAccess, error) {
+	switch {
+	case j.Kind == KindBackup:
+		repo, err := s.repositoryFor(ctx, j)
+		return repo, nil, err
+	case j.Kind.HA():
+		if s.flows == nil {
+			return model.RepositoryAccess{}, nil, fmt.Errorf("HA job %s: %w", j.JobID, errNoFlows)
+		}
+		replication, err := s.flows.Admit(ctx, j)
+		if err != nil {
+			return model.RepositoryAccess{}, nil, s.refuseMoved(ctx, j, err)
+		}
+		return model.RepositoryAccess{}, replication, nil
+	default:
+		// The schema admits only the kinds above, so this is a kind added to
+		// the schema and not here.
+		return model.RepositoryAccess{}, nil, fmt.Errorf("job %s has kind %q, which this server does not run", j.JobID, j.Kind)
+	}
+}
+
+// refuseMoved ends j when err says its HA flow has moved on, and returns err.
+// Other errors are returned as they are, leaving the job to be claimed again.
+func (s *Service) refuseMoved(ctx context.Context, j Job, err error) error {
+	if !errors.Is(err, ErrFlowMoved) {
+		return fmt.Errorf("check HA job %s with its flow: %w", j.JobID, err)
+	}
+	if rejectErr := s.store.Reject(ctx, j.JobID, "Not run: the HA operation it belonged to had moved on"); rejectErr != nil {
+		// Still refused. The job stays queued until the next attempt to end
+		// it, or until it expires.
+		return fmt.Errorf("%w; ending job %s also failed: %w", err, j.JobID, rejectErr)
+	}
+	return err
+}
+
+// repositoryFor returns the repository access a backup job's agent needs.
 func (s *Service) repositoryFor(ctx context.Context, j Job) (model.RepositoryAccess, error) {
 	var spec BackupSpec
 	if err := json.Unmarshal(j.Spec, &spec); err != nil {
@@ -228,9 +333,25 @@ type Reported struct {
 }
 
 // RecordProgress applies a report and renews the attempt's lease.
+//
+// The first report of an HA job is its agent asking to start, and is refused
+// when the job's flow has moved on since the claim: the agent does nothing
+// until its start is acknowledged, so the job ends without having touched the
+// node. Later reports are not checked against the flow. Refusing one would
+// stop the agent partway through a step, which is worse than letting the step
+// finish and the flow judge its result.
 func (s *Service) RecordProgress(ctx context.Context, agent Identity, jobID, attemptID, leaseToken string, p Progress) (Reported, error) {
-	if err := s.assertOwned(ctx, agent, jobID); err != nil {
+	owned, err := s.ownedJob(ctx, agent, jobID)
+	if err != nil {
 		return Reported{}, err
+	}
+	if owned.Kind.HA() && owned.Status == StatusClaimed {
+		if s.flows == nil {
+			return Reported{}, fmt.Errorf("HA job %s: %w", jobID, errNoFlows)
+		}
+		if err := s.flows.Current(ctx, owned); err != nil {
+			return Reported{}, s.refuseMoved(ctx, owned, err)
+		}
 	}
 
 	job, err := s.store.RecordProgress(ctx, jobID, attemptID, token.Hash(leaseToken), p, s.timings.LeaseTTL)
@@ -328,10 +449,19 @@ func (s *Service) GetBackup(ctx context.Context, setID string) (BackupRecord, er
 	}
 }
 
-// RequestCancel asks for a job to stop.
+// RequestCancel asks for a job to stop. An HA job is refused: it ends with
+// its HA operation.
 func (s *Service) RequestCancel(ctx context.Context, jobID string) (Job, error) {
 	if jobID == "" {
 		return Job{}, fmt.Errorf("%w: a job id is required", ErrInvalidRequest)
+	}
+	// A job's kind never changes, so reading it first leaves no gap.
+	j, _, err := s.store.Get(ctx, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	if j.Kind.HA() {
+		return Job{}, fmt.Errorf("%w: job %s is a %s job", ErrNotCancellable, jobID, j.Kind)
 	}
 	return s.store.RequestCancel(ctx, jobID)
 }
@@ -347,17 +477,12 @@ type Identity struct {
 	SystemID string
 }
 
-// assertOwned refuses a job that belongs to another agent's system.
+// ownedJob returns the job if it belongs to the calling agent's system, and
+// refuses it otherwise.
 //
 // This is the second half of authorization. The token establishes which agent
 // is calling; it says nothing about whose work this is. Without this check any
 // enrolled agent could claim, report on, or finish another system's jobs.
-func (s *Service) assertOwned(ctx context.Context, agent Identity, jobID string) error {
-	_, err := s.ownedJob(ctx, agent, jobID)
-	return err
-}
-
-// ownedJob returns the job if it belongs to the calling agent's system.
 func (s *Service) ownedJob(ctx context.Context, agent Identity, jobID string) (Job, error) {
 	job, _, err := s.store.Get(ctx, jobID)
 	if err != nil {

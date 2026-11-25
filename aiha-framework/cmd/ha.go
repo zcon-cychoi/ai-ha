@@ -18,6 +18,7 @@ var (
 	haCreateMaxLatency time.Duration
 	haEventsAfter      int64
 	haEventsLimit      int
+	haSetupOptions     ha.SetupOptions
 )
 
 var haCmd = &cobra.Command{
@@ -104,6 +105,11 @@ replication metadata is not initialized again, and a volume that already holds
 a filesystem is not formatted again. A setup that failed can be asked for again
 once its error is acknowledged ("ha acknowledge").
 
+A data disk must be empty: no filesystem, partition table or other signature,
+and its first and last MiB all zeros. A disk with no signature that still holds
+data is refused, unless --overwrite-disk is given: then what is on it is
+written over. A disk with a signature is refused either way.
+
 The nodes' service is disabled from starting at boot and made to require the
 replicated mount, so that it cannot write to the root filesystem's mount
 point on a node that is not primary. It must be stopped when setup starts.
@@ -188,16 +194,18 @@ func startHAFlow(cmd *cobra.Command, group string, kind ha.FlowKind) error {
 		return err
 	}
 
-	start := flows.Setup
-	if kind == ha.FlowTeardown {
-		start = flows.Teardown
+	var gs ha.GroupStatus
+	var flow ha.Flow
+	if kind == ha.FlowSetup {
+		gs, flow, err = flows.Setup(ctx, group, "cli", haSetupOptions)
+	} else {
+		gs, flow, err = flows.Teardown(ctx, group, "cli")
 	}
-	gs, flow, err := start(ctx, group, "cli")
 	if err != nil {
 		return err
 	}
 	log.Info().Str("groupId", gs.GroupID).Str("flowId", flow.FlowID).Str("kind", string(flow.Kind)).
-		Msg("HA operation started")
+		Bool("overwriteDisk", kind == ha.FlowSetup && haSetupOptions.OverwriteDisk).Msg("HA operation started")
 	out := cmd.OutOrStdout()
 	first := "standby"
 	if kind == ha.FlowTeardown {
@@ -527,6 +535,9 @@ func init() {
 
 	haEventsCmd.Flags().Int64Var(&haEventsAfter, "after", 0, "list events after this sequence number")
 	haEventsCmd.Flags().IntVar(&haEventsLimit, "limit", 50, "how many events to list, at most 1000")
+
+	haSetupCmd.Flags().BoolVar(&haSetupOptions.OverwriteDisk, "overwrite-disk", false,
+		"write over a data disk that has no signature but holds data, instead of refusing it")
 
 	haCmd.AddCommand(haCreateCmd, haListCmd, haStatusCmd, haEventsCmd, haSetupCmd, haTeardownCmd, haAcknowledgeCmd)
 	rootCmd.AddCommand(haCmd)

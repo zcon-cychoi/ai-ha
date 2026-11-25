@@ -250,9 +250,16 @@ func newSecret() (string, error) {
 // Compile-time check that FlowService answers the job queue's questions.
 var _ job.Flows = (*FlowService)(nil)
 
+// SetupOptions are what a setup request can ask beyond the group's spec.
+type SetupOptions struct {
+	// OverwriteDisk lets each node use a data disk that has no signature but
+	// holds data, writing over it. Without it such a disk is refused.
+	OverwriteDisk bool
+}
+
 // Setup starts replication setup on a registered group: the standby's side
 // first. The group is configuring until both sides are up, then syncing.
-func (f *FlowService) Setup(ctx context.Context, idOrName, requestedBy string) (GroupStatus, Flow, error) {
+func (f *FlowService) Setup(ctx context.Context, idOrName, requestedBy string, opts SetupOptions) (GroupStatus, Flow, error) {
 	flowID := f.newID()
 	return f.store.StartFlow(ctx, idOrName, func(c StartContext) (FlowStart, error) {
 		gs := c.Group
@@ -267,7 +274,7 @@ func (f *FlowService) Setup(ctx context.Context, idOrName, requestedBy string) (
 		if err != nil {
 			return FlowStart{}, err
 		}
-		spec, err := setupSpec(gs, flowID, 1, gs.Standby, gs.Primary, false, 0)
+		spec, err := setupSpec(gs, flowID, 1, gs.Standby, gs.Primary, false, 0, opts.OverwriteDisk)
 		if err != nil {
 			return FlowStart{}, err
 		}
@@ -545,7 +552,7 @@ func replicationNode(n Node) model.ReplicationNode {
 }
 
 // setupSpec is the job that sets self's side up.
-func setupSpec(gs GroupStatus, flowID string, step int, self, peer Node, initialPrimary bool, peerDiskBytes int64) (json.RawMessage, error) {
+func setupSpec(gs GroupStatus, flowID string, step int, self, peer Node, initialPrimary bool, peerDiskBytes int64, overwriteDisk bool) (json.RawMessage, error) {
 	spec := model.ReplicationSetupSpec{
 		FlowID:         flowID,
 		Step:           step,
@@ -559,6 +566,7 @@ func setupSpec(gs GroupStatus, flowID string, step int, self, peer Node, initial
 		Peer:           replicationNode(peer),
 		InitialPrimary: initialPrimary,
 		PeerDiskBytes:  peerDiskBytes,
+		OverwriteDisk:  overwriteDisk,
 	}
 	b, err := json.Marshal(spec)
 	if err != nil {

@@ -232,6 +232,9 @@ Setup writes `/etc/drbd.d/<resource>.res` (mode 0600, it holds the shared secret
 and backups leave it out), a mount unit for the volume and a drop-in that makes the
 service require it, and disables the service at boot. It formats only a volume with
 nothing on it and writes metadata only to a blank disk; anything else is refused.
+A blank disk has no signature and reads as zeros in its first and last MiB. A disk
+with no signature that still holds data is written over only when the job asks
+for it (`ha setup --overwrite-disk`).
 Teardown removes those files and leaves the data and the metadata on the disk.
 
 ## Agent-local state

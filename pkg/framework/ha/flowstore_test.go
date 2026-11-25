@@ -189,14 +189,14 @@ func TestSetupFlowRunsTheStandbyThenThePrimary(t *testing.T) {
 	e.report(RolePrimary, resourceGone)
 	e.report(RoleStandby, resourceGone)
 
-	gs, flow, err := e.flows.Setup(e.ctx, e.gs.Name, "test")
+	gs, flow, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	if gs.State != StateConfiguring || flow.Step != 1 || len(flow.Jobs) != 1 || flow.Jobs[0].SystemID != e.gs.Standby.SystemID {
 		t.Fatalf("after setup: state %s, flow %+v", gs.State, flow)
 	}
-	if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test"); !errors.Is(err, ErrFlowInProgress) {
+	if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); !errors.Is(err, ErrFlowInProgress) {
 		t.Fatalf("second setup: err = %v, want ErrFlowInProgress", err)
 	}
 	sealed := e.sealed()
@@ -220,7 +220,7 @@ func TestSetupFlowRunsTheStandbyThenThePrimary(t *testing.T) {
 	if err := json.Unmarshal(claimed.Job.Spec, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.InitialPrimary || spec.Self.Hostname != "host-standby" || spec.Self.NodeID != 1 ||
+	if spec.InitialPrimary || spec.OverwriteDisk || spec.Self.Hostname != "host-standby" || spec.Self.NodeID != 1 ||
 		spec.Self.Disk != e.gs.Standby.Disk || spec.Peer.Disk != e.gs.Primary.Disk || spec.FlowID != flow.FlowID {
 		t.Fatalf("standby spec = %+v", spec)
 	}
@@ -249,7 +249,7 @@ func TestSetupFlowRunsTheStandbyThenThePrimary(t *testing.T) {
 	if err := json.Unmarshal(claimed.Job.Spec, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if !spec.InitialPrimary || spec.Self.NodeID != 0 || spec.Self.Disk != e.gs.Primary.Disk || spec.PeerDiskBytes != 8<<30 {
+	if !spec.InitialPrimary || spec.OverwriteDisk || spec.Self.NodeID != 0 || spec.Self.Disk != e.gs.Primary.Disk || spec.PeerDiskBytes != 8<<30 {
 		t.Fatalf("primary spec = %+v", spec)
 	}
 	e.report(RolePrimary, upPrimary)
@@ -286,6 +286,39 @@ func TestSetupFlowRunsTheStandbyThenThePrimary(t *testing.T) {
 	}
 }
 
+// Asked to overwrite data disks, both nodes' jobs say so: the primary's is
+// made from the standby's.
+func TestSetupOverwriteDiskReachesBothNodes(t *testing.T) {
+	e := newFlowEnv(t)
+	e.report(RolePrimary, resourceGone)
+	e.report(RoleStandby, resourceGone)
+	_, flow, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{OverwriteDisk: true})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	var spec model.ReplicationSetupSpec
+	claimed := e.runJob(RoleStandby, flow.Jobs[0].JobID, job.OutcomeCompleted, model.ReplicationJobResult{DiskBytes: 8 << 30})
+	if err := json.Unmarshal(claimed.Job.Spec, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if !spec.OverwriteDisk || spec.InitialPrimary {
+		t.Fatalf("standby spec = %+v", spec)
+	}
+	e.report(RoleStandby, upSecondary)
+	e.advance()
+	f := e.latest()
+	if f.Step != 2 || len(f.Jobs) != 2 {
+		t.Fatalf("after the standby: %+v", f)
+	}
+	claimed = e.runJob(RolePrimary, f.Jobs[1].JobID, job.OutcomeCompleted, model.ReplicationJobResult{DiskBytes: 8 << 30})
+	if err := json.Unmarshal(claimed.Job.Spec, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if !spec.OverwriteDisk || !spec.InitialPrimary {
+		t.Fatalf("primary spec = %+v", spec)
+	}
+}
+
 // The roadmap's mid-failure case: the primary's step fails. The flow stops in
 // error; acknowledged, the group can be set up again with the same secret, so
 // that the standby, already set up, finds nothing to change.
@@ -293,7 +326,7 @@ func TestFailedSetupStopsAndCanBeAskedAgain(t *testing.T) {
 	e := newFlowEnv(t)
 	e.report(RolePrimary, resourceGone)
 	e.report(RoleStandby, resourceGone)
-	_, flow, err := e.flows.Setup(e.ctx, e.gs.Name, "test")
+	_, flow, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +345,7 @@ func TestFailedSetupStopsAndCanBeAskedAgain(t *testing.T) {
 	if s := e.state(); s != StateError {
 		t.Fatalf("state = %s, want error", s)
 	}
-	if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test"); !errors.Is(err, ErrWrongState) {
+	if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); !errors.Is(err, ErrWrongState) {
 		t.Fatalf("setup from error: %v", err)
 	}
 
@@ -320,7 +353,7 @@ func TestFailedSetupStopsAndCanBeAskedAgain(t *testing.T) {
 	if err != nil || gs.State != StateRegistered {
 		t.Fatalf("acknowledge: %s, %v", gs.State, err)
 	}
-	if _, flow2, err := e.flows.Setup(e.ctx, e.gs.Name, "test"); err != nil || flow2.FlowID == flow.FlowID {
+	if _, flow2, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); err != nil || flow2.FlowID == flow.FlowID {
 		t.Fatalf("setup again: %+v, %v", flow2, err)
 	}
 	if !bytes.Equal(e.sealed(), sealed) {
@@ -334,7 +367,7 @@ func TestAStepTheNodeNeverBearsOutStopsTheFlow(t *testing.T) {
 	e := newFlowEnv(t)
 	e.report(RolePrimary, resourceGone)
 	e.report(RoleStandby, resourceGone)
-	_, flow, err := e.flows.Setup(e.ctx, e.gs.Name, "test")
+	_, flow, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +426,7 @@ func TestFlowStartRefusals(t *testing.T) {
 	t.Run("silent node", func(t *testing.T) {
 		e := newFlowEnv(t)
 		e.report(RolePrimary, resourceGone)
-		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test"); !errors.Is(err, ErrNodeSilent) {
+		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); !errors.Is(err, ErrNodeSilent) {
 			t.Fatalf("err = %v, want ErrNodeSilent", err)
 		}
 	})
@@ -407,7 +440,7 @@ func TestFlowStartRefusals(t *testing.T) {
 		}, time.Hour); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test"); !errors.Is(err, ErrSystemBusy) {
+		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); !errors.Is(err, ErrSystemBusy) {
 			t.Fatalf("err = %v, want ErrSystemBusy", err)
 		}
 		if s := e.state(); s != StateRegistered {
@@ -421,7 +454,7 @@ func TestFlowStartRefusals(t *testing.T) {
 		}
 		e.report(RolePrimary, resourceGone)
 		e.report(RoleStandby, resourceGone)
-		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test"); !errors.Is(err, ErrInvalidRequest) {
+		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("err = %v, want ErrInvalidRequest", err)
 		}
 	})
@@ -431,7 +464,7 @@ func TestFlowStartRefusals(t *testing.T) {
 		e.report(RoleStandby, resourceGone)
 		keyless := NewFlowService(e.store, nil, Timings{ReportInterval: 30 * time.Second, StaleAfter: flowStale},
 			5*time.Minute, func() string { return randomHex(t, 8) })
-		if _, _, err := keyless.Setup(e.ctx, e.gs.Name, "test"); !errors.Is(err, ErrNoSecretKey) {
+		if _, _, err := keyless.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); !errors.Is(err, ErrNoSecretKey) {
 			t.Fatalf("err = %v, want ErrNoSecretKey", err)
 		}
 	})
@@ -439,7 +472,7 @@ func TestFlowStartRefusals(t *testing.T) {
 		e := newFlowEnv(t)
 		e.report(RolePrimary, resourceGone)
 		e.report(RoleStandby, resourceGone)
-		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test"); err != nil {
+		if _, _, err := e.flows.Setup(e.ctx, e.gs.Name, "test", SetupOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := e.flows.Teardown(e.ctx, e.gs.Name, "test"); !errors.Is(err, ErrFlowInProgress) {

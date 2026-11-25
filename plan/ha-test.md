@@ -83,9 +83,9 @@ lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,ID-LINK
 새 디스크에 파티션·파일시스템·마운트가 없어야 한다. `ID-LINK`가 있어야 한다(없으면 `ls -l /dev/disk/by-id/`).
 이 값은 2절에서 프레임워크 인벤토리로도 보이므로 따로 적지 않아도 된다.
 
-서명이 없다고 빈 디스크는 아니다. `drbdadm create-md`는 0이 아닌 데이터가 있으면 확인을 묻고 멈추는데,
-에이전트는 `blkid`로만 판단하므로 구성 1단계가 `Do you want to proceed?`로 실패한다. 디스크가 실제로
-0인지 본다(스냅샷에서 만든 볼륨이나 재사용한 볼륨은 아닐 수 있다).
+서명이 없다고 빈 디스크는 아니다. 구성은 서명이 없는 디스크의 앞뒤 1 MiB가 0인지 보고, 아니면
+`… has no filesystem or other signature, but its first or last MiB is not zeros`로 거절한다. 2026-11-24 AWS에서는
+스냅샷 없이 만든 새 gp3 볼륨도 0이 아니었다. 미리 확인해 두려면:
 
 ```bash
 D=/dev/nvme1n1; S=$(sudo blockdev --getsize64 $D)
@@ -93,6 +93,9 @@ sudo head -c 1048576 $D | tr -d '\0' | wc -c                                    
 sudo dd if=$D bs=1M skip=$((S/1048576-1)) count=1 status=none | tr -d '\0' | wc -c       # 0
 # 0이 아니면, 지워도 되는 디스크일 때만: sudo blkdiscard -z $D   (되돌릴 수 없다, 8 GiB에 약 1분)
 ```
+
+비우지 않고 쓰려면 4.2에서 `ha setup ha-test --overwrite-disk`로 요청한다. 디스크의 내용을 덮어쓰며, 잡 메시지의
+`did`에 `overwrite-disk-data`가 나온다.
 
 ### 1.3 시험 서비스
 
@@ -417,7 +420,8 @@ sudo rm /etc/systemd/system/aiha-test.service && sudo systemctl daemon-reload
 | 잡이 `refused: this node is "…" but the job is for "…"` | 그 노드의 호스트명이 보고 뒤 바뀌었다. 다음 보고 뒤 `ha acknowledge` → `ha setup` |
 | 잡 완료 뒤 흐름이 `failed`: `… reports … do not show the resource up as Secondary` | 그 노드의 `ha status` `Replication` 줄과 `sudo drbdadm status <RES>` |
 | `refused: … holds ext4` 등 | 빈 디스크가 아니다. 다른 디스크를 쓰거나 `wipefs -a`(데이터 삭제) |
-| B 잡이 `create the replication metadata: … Do you want to proceed?` | 서명은 없지만 0이 아닌 데이터가 있다(1.2). 확인 후 `blkdiscard -z` |
+| B 잡이 `refused: … has no filesystem or other signature, but its first or last MiB is not zeros` | 서명은 없지만 데이터가 있다(1.2). 확인 후 `blkdiscard -z`, 또는 `ha setup --overwrite-disk` |
+| B 잡이 `create the replication metadata: … Do you want to proceed?` | 0 검사가 없는 옛 에이전트 빌드다. 위와 같이 처리 |
 | B 잡이 `A dependency job for drbd@….target failed`, 저널에 `… is not a valid number` | 에이전트가 유닛 이름의 `-`를 이스케이프하지 않는 옛 빌드다(2026-11-24 수정) |
 | 판정이 계속 `attention`(B의 프로브 실패) | B → A 8000/tcp |
 
@@ -454,8 +458,9 @@ sudo rm /etc/systemd/system/aiha-test.service && sudo systemctl daemon-reload
 1. **데이터 디스크가 비어 있지 않았다(환경).** 두 EBS 모두 4 KiB 이후 끝까지 무작위 데이터였고, 부팅 뒤 쓴 기록이
    없어 붙을 때부터 그 상태였다(출처 미확인). `blkid`는 서명을 찾지 못해 에이전트가 `create-md`를 했고,
    `drbdmeta`가 `Found some data`로 확인을 물어 실패했다. 1차 시험(codex)이 멈춘 곳이다.
-   `blkdiscard -z`로 비운 뒤 진행했다. 새로 만든 인스턴스·볼륨에서는 `blkid`가 종료 코드 2(서명 없음)로 정상이고
-   디스크도 0이므로, 0 검사는 고도화 때 검토한다([ha-roadmap.md](ha-roadmap.md) 9절).
+   `blkdiscard -z`로 비운 뒤 진행했다. 2026-11-24 새 인스턴스(스냅샷·암호화 없는 새 gp3, 공식 AMI)의 볼륨도
+   부팅 뒤 쓰기 0회인 상태에서 같은 모양이었다. 2026-11-25 수정: 서명 없는 디스크의 앞뒤 1 MiB 0 검사로 분명히
+   거절하고, `ha setup --overwrite-disk`로 덮어쓸 수 있게 했다([ha-roadmap.md](ha-roadmap.md) H3b 구현 메모).
 2. **DRBD 유닛 이름 이스케이프 결함(코드, 수정함).** 에이전트가 `drbd@aiha-16c07671.target`을 그대로 썼는데,
    `drbd@.service`는 풀린 인스턴스 이름(`%I`)을 넘기므로 `-`가 `/`가 되어 `drbdadm adjust aiha/16c07671`(리소스
    `aiha`의 볼륨 `16c07671`)로 실행되고 `16c07671 is not a valid number`로 실패했다. 기본 리소스 이름
@@ -465,3 +470,18 @@ sudo rm /etc/systemd/system/aiha-test.service && sudo systemctl daemon-reload
 3. 문서 기대값 수정: 5.1의 B 프로브 사유(의도적 생략), 5.2의 B `Outdated` 사유, 유닛 이름 이스케이프(4.5, 11절).
 4. 재부팅 직후 에이전트의 첫 보고가 DRBD 기동 전에 나가 한 보고 주기 동안 `degraded`가 된다. 문제는 아니지만,
    `aiha-agent.service`를 `drbd-configured.target` 뒤에 두면 없앨 수 있다(미적용).
+
+### 2026-11-25 가용 영역 간, 빈 디스크 검사
+
+AWS ap-northeast-2, 같은 VPC의 다른 서브넷·가용 영역: A `10.0.1.198`(2d), B `10.0.2.149`(2a), 모두 t3.medium, 새
+인스턴스와 새 gp3 8 GiB. 그룹 `ha-az`(`0b5bfe2cfb49fc12`), 리소스 `aiha-0b5bfe2c`, 에이전트·프레임워크
+`dev-blankdisk`(브랜치 `ha/blank-disk-check`). 시험 2·3(실패 심기 없이)과 쓰기 지연만 했다.
+
+| # | 시험 | 결과 | 비고(시간, 출력) |
+| --- | --- | --- | --- |
+| 1 | 데이터 디스크 상태 | 확인 | 두 볼륨 모두 `blkid -p` 종료 코드 2(서명 없음)인데 앞뒤 1 MiB 중 0이 아닌 바이트가 약 104만. 인벤토리는 서명만 보므로 `HOLDS nothing` |
+| 3 | 기본 `setup` 거절 | 통과 | 1단계(B)에서 `refused: … has no filesystem or other signature, but its first or last MiB is not zeros: …`. 두 노드에 `.res` 없음, 디스크 내용 그대로. `error` → `acknowledge` |
+| 3 | `setup --overwrite-disk` → `protected` | 통과 | 두 잡 모두 `did … create-metadata, overwrite-disk-data, …`. A는 이어서 `first-promotion, format-volume, mount-volume, start-service`. 흐름 약 30초 |
+| 3 | 초기 동기화 시간 | 측정 | 88초(`configuring -> syncing` 04:51:07 → `syncing -> protected` 04:52:35, 평가 주기 30초만큼 오차) |
+| - | 쓰기 지연(가용 영역 간) | 측정 | A `/data`, 같은 fio 조건(시험 서비스는 띄운 채): 183 IOPS, 쓰기 평균 1.78 ms(p50 1.71, p99 3.69), fsync 평균 3.66 ms. ping RTT 평균 0.78 ms. 같은 서브넷(0.33 ms, 1.30 ms) 대비 쓰기 약 +0.5 ms |
+| - | 포트 | 확인 | 서브넷 사이 7789/tcp 양방향, B → A 8000/tcp 열림 |

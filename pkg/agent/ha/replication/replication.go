@@ -62,6 +62,9 @@ const (
 	StepServiceDropIn  = "require-mount-for-service"
 	StepDisableService = "disable-service-at-boot"
 	StepCreateMetadata = "create-metadata"
+	// StepOverwriteData is reported, done, when metadata was created over a
+	// disk that held data, as the job asked.
+	StepOverwriteData  = "overwrite-disk-data"
 	StepBringUp        = "bring-up-resource"
 	StepFirstPromotion = "first-promotion"
 	StepPromote        = "promote"
@@ -82,6 +85,12 @@ const connectTimeout = 2 * time.Minute
 
 // pollInterval is how often the link is looked at while waiting for it.
 const pollInterval = 2 * time.Second
+
+// blankEdge is how much of each end of a disk without a signature must read
+// as zeros for the disk to count as empty. drbdmeta asks before creating
+// metadata over a disk whose first 68 KiB are not all zeros, and a job has
+// no one to answer; the internal metadata goes at the end.
+const blankEdge = 1 << 20
 
 var (
 	resourcePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
@@ -180,6 +189,11 @@ func (c *Configurer) setup(ctx context.Context, spec model.ReplicationSetupSpec,
 		return Result{}, err
 	}
 	res := Result{DiskBytes: disk.size}
+	if disk.holdsData && !spec.OverwriteDisk {
+		return res, refuse("%s has no filesystem or other signature, but its first or last MiB is not zeros: "+
+			"setup only uses an empty disk. If nothing on it is needed, clear it (blkdiscard -z) "+
+			"or ask for setup with --overwrite-disk", spec.Self.Disk)
+	}
 	if spec.PeerDiskBytes > 0 && disk.size != spec.PeerDiskBytes {
 		return res, refuse("this node's data disk is %d bytes and the peer's %d: they must be the same size",
 			disk.size, spec.PeerDiskBytes)
@@ -270,10 +284,19 @@ func (c *Configurer) setup(ctx context.Context, spec model.ReplicationSetupSpec,
 	// Metadata, only on a blank disk.
 	switch disk.signature {
 	case "":
-		if _, err := c.runner.Run(ctx, "drbdadm", "create-md", spec.Resource); err != nil {
+		args := []string{"create-md", spec.Resource}
+		if disk.holdsData {
+			// Asked for by the job (checked above): drbdmeta would
+			// otherwise ask whether to go on.
+			args = []string{"create-md", "--force", spec.Resource}
+		}
+		if _, err := c.runner.Run(ctx, "drbdadm", args...); err != nil {
 			return res, fmt.Errorf("create the replication metadata: %w", err)
 		}
 		rec.add(StepCreateMetadata, true)
+		if disk.holdsData {
+			rec.add(StepOverwriteData, true)
+		}
 	case "drbd":
 		rec.add(StepCreateMetadata, false)
 	}
@@ -510,6 +533,9 @@ func (c *Configurer) teardown(ctx context.Context, spec model.ReplicationTeardow
 type diskFacts struct {
 	size      int64
 	signature string
+	// holdsData is set for a disk without a signature whose start or end
+	// is not all zeros.
+	holdsData bool
 }
 
 // inspectDisk checks that byID is a whole disk, unmounted and partitionless,
@@ -555,7 +581,33 @@ func (c *Configurer) inspectDisk(ctx context.Context, byID string) (diskFacts, e
 	if sig != "" && sig != "drbd" {
 		return diskFacts{}, refuse("%s holds %s: setup only uses a new, empty disk, and does not write over one", byID, sig)
 	}
-	return diskFacts{size: *dev.Size, signature: sig}, nil
+	facts := diskFacts{size: *dev.Size, signature: sig}
+	if sig == "" {
+		// blkid knows filesystems and partition tables, not data written
+		// without one.
+		if facts.holdsData, err = c.holdsData(ctx, byID, facts.size); err != nil {
+			return diskFacts{}, err
+		}
+	}
+	return facts, nil
+}
+
+// holdsData reports whether the first or last blankEdge bytes of dev, size
+// bytes long, are not all zeros.
+func (c *Configurer) holdsData(ctx context.Context, dev string, size int64) (bool, error) {
+	n := min(int64(blankEdge), size)
+	for _, skip := range []int64{0, size - n} {
+		_, err := c.runner.Run(ctx, "cmp", "--silent", "--bytes="+strconv.FormatInt(n, 10),
+			"--ignore-initial="+strconv.FormatInt(skip, 10)+":0", "--", dev, "/dev/zero")
+		if code, ok := exitCode(err); ok && code == 1 {
+			// cmp's "differ".
+			return true, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("compare %s with zeros: %w", dev, err)
+		}
+	}
+	return false, nil
 }
 
 // signature returns what blkid finds on dev, empty for nothing. It probes the

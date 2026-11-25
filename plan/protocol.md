@@ -654,10 +654,10 @@ H3a 시점의 서버는 흐름 없이 돌았다(`Flows`가 nil). H3b(2026-11-16)
 
 | 단계 | 하는 일 | 건너뛰는 조건 / 거절 |
 | --- | --- | --- |
-| 실행 전 검사 | 호스트명이 명세와 같은지, 데이터 디스크(`by-id` 링크)가 전체 디스크이고 파티션·마운트가 없는지, `blkid -p` 서명이 없거나 `drbd`인지, 상대 디스크와 크기가 같은지, `drbd@<리소스>.target`이 있는지, `drbd.service`가 enable 되어 있지 않은지, 서비스 유닛이 있고 다른 유닛이 기동하지 않는지(`TriggeredBy`), 서비스가 정지 상태인지 | 하나라도 어긋나면 **아무것도 바꾸지 않고** 거절. 서비스 실행 중은 운영 노드가 이미 구성을 끝낸 상태(리소스 Primary, 마운트 활성)일 때만 허용 |
+| 실행 전 검사 | 호스트명이 명세와 같은지, 데이터 디스크(`by-id` 링크)가 전체 디스크이고 파티션·마운트가 없는지, `blkid -p` 서명이 없거나 `drbd`인지, 서명이 없으면 앞뒤 1 MiB가 0인지(`cmp`, 명세의 `overwriteDisk`가 있으면 0이 아니어도 진행), 상대 디스크와 크기가 같은지, `drbd@<리소스>.target`이 있는지, `drbd.service`가 enable 되어 있지 않은지, 서비스 유닛이 있고 다른 유닛이 기동하지 않는지(`TriggeredBy`), 서비스가 정지 상태인지 | 하나라도 어긋나면 **아무것도 바꾸지 않고** 거절. 서비스 실행 중은 운영 노드가 이미 구성을 끝낸 상태(리소스 Primary, 마운트 활성)일 때만 허용 |
 | 파일 | 리소스 파일(`0600`, DRBD 9 문법, `auto-promote no`, 노드 ID 순), 마운트 유닛(`[Install]` 없음), 서비스 드롭인(`RequiresMountsFor=`), `drbdadm dump`로 문법 확인 | 내용이 같으면 쓰지 않고 `daemon-reload`도 하지 않는다 |
 | 서비스 부팅 기동 해제 | `systemctl disable` | 이미 disable |
-| 메타데이터 | `drbdadm create-md` | 서명이 `drbd`면 생략. `--force`는 쓰지 않는다 |
+| 메타데이터 | `drbdadm create-md` | 서명이 `drbd`면 생략. `--force`는 `overwriteDisk`로 데이터가 있는 디스크를 쓸 때만 붙이고, 그때 `overwrite-disk-data` 단계를 기록한다. `drbdmeta`는 처음 68 KiB가 0이 아니면 확인을 묻고, 잡에는 답할 사람이 없다 |
 | 기동 | `systemctl enable drbd-configured.target drbd@<리소스>.target`, `systemctl start drbd@<리소스>.target`(PID 1이 모듈 적재·`adjust`), `drbdadm adjust`. 유닛 인스턴스는 systemd 이스케이프한 리소스 이름이다(`-` → `\x2d`). `drbd@.service`가 풀린 이름을 `drbdadm`에 넘기므로, 이스케이프하지 않으면 `-`가 `/`가 되어 다른 리소스의 볼륨으로 읽힌다 | 이미 떠 있으면 `adjust`만 적용 |
 | (운영) 승격 | 상대 연결을 최대 2분 기다린 뒤, 양쪽 `Inconsistent`면 `primary --force`(첫 승격), 자기 `UpToDate`면 `primary` | 이미 Primary면 생략. 그 밖의 디스크 상태는 거절 |
 | (운영) 포맷 | `mkfs.ext4 -q -E nodiscard` | 복제 장치에 ext4가 있으면 생략. 다른 서명은 거절 |

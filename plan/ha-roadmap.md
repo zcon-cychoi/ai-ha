@@ -392,6 +392,7 @@ PostgreSQL 테스트로(대기 먼저, 보고가 뒷받침한 뒤에만 다음 �
 | 리소스 기동 | `drbd@<리소스>.target` (7절 결정 7 변경). `drbd.service`가 enable된 노드는 거절 — 설치 기본값은 disabled라 손으로 켠 노드만 걸린다 | 대기 노드 구성이 `drbd.service`의 연결 대기에 걸려 끝나지 않는다 |
 | 마운트 | `/etc/systemd/system/<이름>.mount`를 쓴다(`[Install]` 없음, `Type=ext4`). 이름은 `systemd-escape --path --suffix=mount` | fstab을 고치지 않는다. 부팅 때 마운트되지 않고 에이전트만 기동한다 |
 | 서비스 통제 | 드롭인 `<유닛>.d/aiha-replication.conf`(`RequiresMountsFor=`), `systemctl disable`, 다른 유닛이 기동하면(`TriggeredBy`) 거절 | 4절 항목 9의 세 겹 |
+| 빈 디스크 | 서명이 없는 디스크는 앞뒤 1 MiB가 0이어야 한다(`cmp`). 아니면 거절하고, `ha setup --overwrite-disk`(명세 `overwriteDisk`)일 때만 `drbdadm create-md --force`로 덮어쓴다. 서명·파티션·마운트가 있는 디스크는 이 옵션으로도 거절 (2026-11-25) | `blkid`는 서명만 본다. 2026-11-24 AWS에서는 스냅샷 없이 만든 새 gp3 볼륨이 처음 4 KiB 뒤로 끝까지 고엔트로피 데이터였고, `drbdmeta`가 `Found some data`로 확인을 물어 구성이 알기 어려운 메시지로 실패했다. `drbdmeta`가 보는 곳은 처음 68 KiB다(루프 장치로 확인) |
 | 포맷 | `mkfs.ext4 -q -E nodiscard` | 초기 동기화 중인 장치에 discard를 보내면 장치 전체를 훑는다 |
 | 해제의 down | `drbdsetup secondary/down`(설정 파일 불필요) | 손으로 만든 리소스도 파일이 없어진 뒤에 내릴 수 있다 |
 | 명령 타임아웃 | 복제 잡의 명령은 5분(`aiha-agent/cmd/replication.go`) | 큰 볼륨의 메타데이터·파일시스템 생성은 인벤토리 명령의 30초를 넘을 수 있다 |
@@ -556,7 +557,6 @@ PostgreSQL 테스트로(대기 먼저, 보고가 뒷받침한 뒤에만 다음 �
 | 전환 중 다른 잡의 claim 차단 | 흐름 시작 시 대기·실행 중인 잡이 있으면 거절하고, 흐름 중에는 백업 잡 생성을 거절하는 것으로 대신 |
 | 구성 버전(세대 번호) | 작업 흐름 ID와 단계 확인으로 대신 |
 | teardown의 데이터·메타데이터 삭제 | 수동 정리 절차([ha-h0.md](ha-h0.md) 10절) |
-| 빈 디스크의 0 검사 | 구성 전 판정은 `blkid -p`에 서명이 없는지(종료 코드 2)만 본다(`replication.go`의 `inspectDisk`·`signature`). 서명 없이 0이 아닌 데이터가 있는 디스크(스냅샷 볼륨, 재사용 볼륨)는 통과하고, `drbdadm create-md`가 확인을 물어 `Do you want to proceed?`로 실패한다(2026-11-24 AWS 시험). 새 EBS는 0이고 `blkid`도 종료 코드 2로 정상이라 당장은 두며, 고도화 때 앞뒤 영역 0 확인 뒤 분명한 메시지로 거절하는 것을 검토한다. 그때까지는 [ha-test.md](ha-test.md) 1.2의 확인 절차 |
 | 북향 REST API | TM-AI-HA-04의 선행 과제. 1차년도 프로토타입은 CLI (설계서 그림 6-1). 이벤트 순번 구조만 미리 맞춘다 |
 | 서비스 재기동 작업 | TM-AI-HA-04 표 3-6의 추가 예정 항목 |
 | 운영 데이터 백업, 재시드 자동화 | 설계서 표 6-4, 6.5. 재시드는 운영 규칙으로 둔다 |

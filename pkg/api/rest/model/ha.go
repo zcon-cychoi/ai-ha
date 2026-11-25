@@ -340,6 +340,11 @@ type ReplicationSetupSpec struct {
 	// setup measured it. Set for the initial primary, which refuses a disk of
 	// another size; zero leaves the sizes unchecked.
 	PeerDiskBytes int64 `json:"peerDiskBytes,omitempty" example:"8589934592"`
+	// OverwriteDisk lets setup use a data disk that has no signature but
+	// does not read as zeros at its start or end, writing over what is
+	// there. A disk with a filesystem, partitions or mounts is refused all
+	// the same.
+	OverwriteDisk bool `json:"overwriteDisk,omitempty" example:"false"`
 }
 
 // ReplicationTeardownSpec asks a node to remove its side of a replication

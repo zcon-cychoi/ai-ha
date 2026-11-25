@@ -48,6 +48,7 @@ type node struct {
 	diskChildren []string // names of devices on the disk, e.g. "nvme1n1p1"
 	diskMounts   []string
 	diskSig      string // what blkid finds on the disk
+	diskData     string // where the disk holds data blkid does not see: "", "head" or "tail"
 	volumeSig    string // what blkid finds on the replicated device
 
 	units map[string]*unitProps
@@ -229,8 +230,25 @@ func (n *node) Run(_ context.Context, name string, args ...string) ([]byte, erro
 
 	case cmd == "drbdadm dump "+testResource:
 		return []byte("resource ... shared-secret " + testSecret), nil
+	case name == "cmp":
+		// cmp --silent --bytes=N --ignore-initial=SKIP:0 -- <disk> /dev/zero
+		head := "cmp --silent --bytes=1048576 --ignore-initial=0:0 -- " + testDisk + " /dev/zero"
+		tail := fmt.Sprintf("cmp --silent --bytes=1048576 --ignore-initial=%d:0 -- %s /dev/zero", diskSize-1<<20, testDisk)
+		switch {
+		case cmd == head && n.diskData == "head", cmd == tail && n.diskData == "tail":
+			return nil, fmt.Errorf("run cmp: %w", exitErr(1))
+		case cmd == head, cmd == tail:
+			return nil, nil
+		}
 	case cmd == "drbdadm create-md "+testResource:
+		if n.diskData != "" {
+			// drbdmeta asks, and a job has no one to answer.
+			return nil, fmt.Errorf("run drbdadm: %w: Found some data", exitErr(1))
+		}
 		n.diskSig = "drbd"
+		return nil, nil
+	case cmd == "drbdadm create-md --force "+testResource:
+		n.diskSig, n.diskData = "drbd", ""
 		return nil, nil
 	case cmd == "drbdadm adjust "+testResource:
 		n.bringUp()
@@ -397,6 +415,52 @@ func TestRepeatedStandbySetupRedoesNothing(t *testing.T) {
 	}
 }
 
+// A disk that holds data blkid does not recognize is written over only when
+// the job asks; a disk that reads as zeros is not forced even then.
+func TestSetupOverwriteDisk(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		data      string
+		overwrite bool
+	}{
+		{name: "data at the start", data: "head", overwrite: true},
+		{name: "data at the end", data: "tail", overwrite: true},
+		{name: "empty disk, overwrite asked", overwrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := newNode(t)
+			n.diskData = tc.data
+			spec := standbySpec()
+			spec.OverwriteDisk = tc.overwrite
+			res, err := n.configurer("ip-10-0-2-10").Setup(context.Background(), spec, testSecret)
+			if err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			forced := tc.data != ""
+			if n.ran("drbdadm create-md --force") != forced {
+				t.Errorf("create-md --force run = %v, want %v: %v", !forced, forced, n.calls)
+			}
+			if !stepDone(t, res, StepCreateMetadata) {
+				t.Errorf("metadata not created: %+v", res.Steps)
+			}
+			overwrote := slices.ContainsFunc(res.Steps, func(s model.ReplicationStep) bool { return s.Name == StepOverwriteData && s.Done })
+			if overwrote != forced {
+				t.Errorf("%s reported = %v, want %v: %+v", StepOverwriteData, overwrote, forced, res.Steps)
+			}
+
+			// Asked again without the option, the node now holds metadata
+			// and is not looked at for data.
+			n.calls = nil
+			if _, err := n.configurer("ip-10-0-2-10").Setup(context.Background(), standbySpec(), testSecret); err != nil {
+				t.Fatalf("second Setup: %v", err)
+			}
+			if n.ran("cmp") || n.ran("drbdadm create-md") {
+				t.Errorf("second Setup looked again: %v", n.calls)
+			}
+		})
+	}
+}
+
 func TestInitialPrimarySetup(t *testing.T) {
 	n := newNode(t)
 	n.peerRole, n.peerDisk = "Secondary", "Inconsistent"
@@ -512,6 +576,13 @@ func TestSetupRefusals(t *testing.T) {
 		want    string
 	}{
 		{name: "disk holds a filesystem", prepare: func(n *node) { n.diskSig = "ext4" }, want: "holds ext4"},
+		{name: "disk holds data at its start", prepare: func(n *node) { n.diskData = "head" }, want: "--overwrite-disk"},
+		{name: "disk holds data at its end", prepare: func(n *node) { n.diskData = "tail" }, want: "not zeros"},
+		{name: "disk holds a filesystem, overwrite asked", prepare: func(n *node) { n.diskSig = "ext4" }, spec: func() model.ReplicationSetupSpec {
+			s := standbySpec()
+			s.OverwriteDisk = true
+			return s
+		}, want: "holds ext4"},
 		{name: "disk is partitioned", prepare: func(n *node) { n.diskChildren = []string{"nvme1n1p1"} }, want: "holds nvme1n1p1"},
 		{name: "disk is mounted", prepare: func(n *node) { n.diskMounts = []string{"/mnt"} }, want: "mounted at /mnt"},
 		{name: "a partition, not a disk", prepare: func(n *node) { n.diskType = "part" }, want: "not a whole disk"},

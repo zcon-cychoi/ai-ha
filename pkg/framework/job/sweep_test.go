@@ -2,7 +2,9 @@ package job
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -68,6 +70,232 @@ func TestSweepRequeuesAClaimNeverStarted(t *testing.T) {
 	// And another claim can take the requeued job.
 	if _, err := svc.Claim(ctx, identity(), job.JobID, "ffffffffffffffffffffffffffffffff"); err != nil {
 		t.Fatalf("the requeued job could not be claimed again: %v", err)
+	}
+}
+
+// A claim that reaches the job's expiry without starting cannot be requeued,
+// because the queue no longer offers an expired job. Left claimed, it would
+// count as unfinished for ever and hold up an HA flow waiting on it. It fails,
+// and its attempt is closed with it, so that a late start is refused.
+func TestSweepFailsAClaimThatExpiredBeforeStarting(t *testing.T) {
+	svc, _, pool := testService(t)
+	ctx := context.Background()
+	job := enqueue(t, svc, pool)
+
+	claimed, err := svc.Claim(ctx, identity(), job.JobID, testClaimKey)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	age(t, pool, "jobs", "expires_at", "job_id", job.JobID)
+
+	counts, err := svc.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if counts.ClaimedExpired != 1 {
+		t.Errorf("counts = %+v, want one claimed expiry", counts)
+	}
+	if status := statusOf(t, svc, job.JobID); status != StatusFailed {
+		t.Fatalf("status = %s, want failed", status)
+	}
+	_, attempt, err := svc.Get(ctx, job.JobID)
+	if err != nil || attempt == nil {
+		t.Fatalf("get: %v", err)
+	}
+	if attempt.Outcome != OutcomeFailed || attempt.FinishedAt == nil {
+		t.Errorf("attempt = %s finished %v, want failed and finished", attempt.Outcome, attempt.FinishedAt)
+	}
+
+	// The lease is still live, but the attempt is closed: the agent coming
+	// back to start must be turned away.
+	_, err = svc.RecordProgress(ctx, identity(), job.JobID, claimed.Attempt.AttemptID,
+		claimed.LeaseToken, Progress{Seq: 1, Advanced: true})
+	if !errors.Is(err, ErrLeaseInvalid) {
+		t.Fatalf("a late start report: err = %v, want ErrLeaseInvalid", err)
+	}
+	if status := statusOf(t, svc, job.JobID); status != StatusFailed {
+		t.Fatalf("status after the late report = %s, want failed", status)
+	}
+}
+
+// A start report can land on its attempt just as the job is ended or
+// requeued, before the attempt is closed. The report must not be answered as
+// a start: the agent would begin a job that is no longer its own.
+func TestStartReportRefusedWhenTheJobEndedUnderIt(t *testing.T) {
+	svc, _, pool := testService(t)
+	ctx := context.Background()
+	job := enqueue(t, svc, pool)
+
+	claimed, err := svc.Claim(ctx, identity(), job.JobID, testClaimKey)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// The job ends with its attempt still open: the moment between the two.
+	if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'failed', finished_at = now() WHERE job_id = $1`,
+		job.JobID); err != nil {
+		t.Fatalf("end the job: %v", err)
+	}
+
+	_, err = svc.RecordProgress(ctx, identity(), job.JobID, claimed.Attempt.AttemptID,
+		claimed.LeaseToken, Progress{Seq: 1, Advanced: true})
+	if !errors.Is(err, ErrLeaseInvalid) {
+		t.Fatalf("start report on an ended job: err = %v, want ErrLeaseInvalid", err)
+	}
+	if status := statusOf(t, svc, job.JobID); status != StatusFailed {
+		t.Fatalf("status = %s, want failed", status)
+	}
+}
+
+// Expiry is the deadline to start, whether or not the sweeper has run yet.
+func TestStartReportRefusedOnceTheJobExpired(t *testing.T) {
+	svc, _, pool := testService(t)
+	ctx := context.Background()
+	job := enqueue(t, svc, pool)
+
+	claimed, err := svc.Claim(ctx, identity(), job.JobID, testClaimKey)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	age(t, pool, "jobs", "expires_at", "job_id", job.JobID)
+
+	_, err = svc.RecordProgress(ctx, identity(), job.JobID, claimed.Attempt.AttemptID,
+		claimed.LeaseToken, Progress{Seq: 1, Advanced: true})
+	if !errors.Is(err, ErrLeaseInvalid) {
+		t.Fatalf("start report after expiry: err = %v, want ErrLeaseInvalid", err)
+	}
+	if status := statusOf(t, svc, job.JobID); status != StatusClaimed {
+		t.Fatalf("status = %s, want claimed until the sweeper ends it", status)
+	}
+	if _, err := svc.Sweep(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if status := statusOf(t, svc, job.JobID); status != StatusFailed {
+		t.Fatalf("status after sweep = %s, want failed", status)
+	}
+}
+
+// The deadline is judged when the report holds the job, not when its
+// transaction began. A start report that waits on the job's row while the
+// claim expires must be refused, though its transaction opened before the
+// expiry: now() would still be that earlier time.
+func TestStartReportRefusedWhenTheJobExpiresWhileItWaits(t *testing.T) {
+	svc, _, pool := testService(t)
+	ctx := context.Background()
+	job := enqueue(t, svc, pool)
+
+	claimed, err := svc.Claim(ctx, identity(), job.JobID, testClaimKey)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	// Another session holds the job's row and moves its expiry just ahead.
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	var holderPID int32
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatalf("holder pid: %v", err)
+	}
+	var expiresAt time.Time
+	if err := holder.QueryRow(ctx, `
+UPDATE jobs SET expires_at = clock_timestamp() + interval '1 second'
+ WHERE job_id = $1
+RETURNING expires_at`, job.JobID).Scan(&expiresAt); err != nil {
+		t.Fatalf("move the expiry: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.RecordProgress(ctx, identity(), job.JobID, claimed.Attempt.AttemptID,
+			claimed.LeaseToken, Progress{Seq: 1, Advanced: true})
+		done <- err
+	}()
+
+	waitBlockedBy(t, pool, holderPID)
+	var dbNow time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
+		t.Fatalf("clock: %v", err)
+	}
+	if !dbNow.Before(expiresAt) {
+		t.Fatal("the report began waiting only after the expiry; the test proves nothing")
+	}
+
+	// The expiry passes while the report waits; then the row is released.
+	time.Sleep(expiresAt.Sub(dbNow) + 200*time.Millisecond)
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release the row: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrLeaseInvalid) {
+			t.Fatalf("start report that waited past the expiry: err = %v, want ErrLeaseInvalid", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the start report did not return after the row was released")
+	}
+	if status := statusOf(t, svc, job.JobID); status != StatusClaimed {
+		t.Fatalf("status = %s, want claimed until the sweeper ends it", status)
+	}
+}
+
+// waitBlockedBy waits until some session waits on a lock that pid holds.
+func waitBlockedBy(t *testing.T, pool *pgxpool.Pool, pid int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var blocked bool
+		if err := pool.QueryRow(context.Background(), `
+SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY (pg_blocking_pids(pid)))`,
+			pid).Scan(&blocked); err != nil {
+			t.Fatalf("look for a blocked session: %v", err)
+		}
+		if blocked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no session began waiting on the held row")
+}
+
+// A job handed to a second attempt is that attempt's. The first one's report
+// must be refused even though the job is running, which is what a check of
+// the job's status alone would accept.
+func TestReportRefusedWhenAnotherAttemptRunsTheJob(t *testing.T) {
+	svc, _, pool := testService(t)
+	ctx := context.Background()
+	job := enqueue(t, svc, pool)
+
+	first, err := svc.Claim(ctx, identity(), job.JobID, testClaimKey)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	age(t, pool, "attempts", "created_at", "attempt_id", first.Attempt.AttemptID)
+	if _, err := svc.Sweep(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	second, err := svc.Claim(ctx, identity(), job.JobID, "ffffffffffffffffffffffffffffffff")
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if _, err := svc.RecordProgress(ctx, identity(), job.JobID, second.Attempt.AttemptID,
+		second.LeaseToken, Progress{Seq: 1, Advanced: true}); err != nil {
+		t.Fatalf("second attempt's start: %v", err)
+	}
+
+	_, err = svc.RecordProgress(ctx, identity(), job.JobID, first.Attempt.AttemptID,
+		first.LeaseToken, Progress{Seq: 1, Advanced: true})
+	if !errors.Is(err, ErrLeaseInvalid) {
+		t.Fatalf("first attempt's report: err = %v, want ErrLeaseInvalid", err)
+	}
+	j, attempt, err := svc.Get(ctx, job.JobID)
+	if err != nil || attempt == nil {
+		t.Fatalf("get: %v", err)
+	}
+	if j.Status != StatusRunning || attempt.AttemptID != second.Attempt.AttemptID {
+		t.Fatalf("job %s on attempt %s, want running on %s", j.Status, attempt.AttemptID, second.Attempt.AttemptID)
 	}
 }
 

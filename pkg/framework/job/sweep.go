@@ -15,6 +15,10 @@ import (
 //   - A claimed job was taken but never reported starting. Nothing has been
 //     written to the repository yet, so returning it to the queue is safe and
 //     another agent can pick it up.
+//   - A claimed job that reaches its expiry without starting cannot go back
+//     to the queue, which no longer offers it, so it fails as an expired
+//     queued job does. Its attempt is closed with it, so that a start report
+//     arriving late is refused rather than starting a job that has ended.
 //   - A running job's agent stopped reporting while it may have been reading
 //     disks and uploading. Its lease expiring does not stop it. Handing the
 //     job to a second agent would put two writers on the same target, so it is
@@ -38,6 +42,37 @@ UPDATE jobs
        message = 'No agent took this job before it expired'
  WHERE status = 'queued' AND expires_at <= now()`,
 			count: &counts.QueuedExpired,
+		},
+		{
+			// The job and its attempt end in one statement, the job's row
+			// locked first, in job order so that two sweepers cannot lock the
+			// same rows in opposite orders. A start report moves the job to
+			// running under the same row lock, so one of the two wins: either
+			// the job started and is left alone, or it ended and the start
+			// finds it so.
+			// Ended apart, a start report could land on the open attempt in
+			// between, or the attempt be closed under a job that started.
+			name: "claimed but expired before starting",
+			sql: `
+WITH expired AS (
+    SELECT job_id, current_attempt_id
+      FROM jobs
+     WHERE status = 'claimed' AND expires_at <= now()
+     ORDER BY job_id
+       FOR UPDATE
+), closed AS (
+    UPDATE attempts a
+       SET outcome = 'failed', finished_at = now(),
+           message = 'The agent did not start this job before it expired'
+      FROM expired e
+     WHERE a.attempt_id = e.current_attempt_id AND a.finished_at IS NULL
+)
+UPDATE jobs j
+   SET status = 'failed', finished_at = now(),
+       message = 'The agent did not start this job before it expired'
+  FROM expired e
+ WHERE j.job_id = e.job_id`,
+			count: &counts.ClaimedExpired,
 		},
 		{
 			// Back to the queue, not failed: the agent never reported starting,

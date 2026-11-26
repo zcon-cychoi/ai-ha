@@ -234,6 +234,9 @@ type SweepCounts struct {
 	// ClaimedReturned are jobs whose agent took them but never started. Safe
 	// to requeue: nothing was written.
 	ClaimedReturned int
+	// ClaimedExpired are jobs whose agent took them but did not start before
+	// they expired. They are failed: the queue no longer offers them.
+	ClaimedExpired int
 	// RunningAbandoned are jobs whose agent stopped reporting while it may
 	// have been writing. They are failed, not requeued.
 	RunningAbandoned int
@@ -243,7 +246,7 @@ type SweepCounts struct {
 
 // Total reports whether the sweep changed anything.
 func (c SweepCounts) Total() int {
-	return c.QueuedExpired + c.ClaimedReturned + c.RunningAbandoned + c.CancelUnconfirmed
+	return c.QueuedExpired + c.ClaimedReturned + c.ClaimedExpired + c.RunningAbandoned + c.CancelUnconfirmed
 }
 
 // Store persists jobs and attempts. All time comparisons use the store's

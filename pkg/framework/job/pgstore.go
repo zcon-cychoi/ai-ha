@@ -189,25 +189,32 @@ func (s *PGStore) reclaim(ctx context.Context, jobID string, a NewAttempt, lease
 }
 
 // progressSQL applies a report only while the attempt is current, holds a live
-// lease and matches the presented token, and extends the lease in the same
-// statement.
+// lease and matches the presented token, and, for a job that has not started,
+// before the job's expiry: expiry is the deadline to start. It extends the
+// lease in the same statement.
+//
+// The deadlines are read against statement_timestamp(), not now(). The
+// statement runs after the job's lock was taken, and now() is when the
+// transaction began: a report that waited on the lock past a deadline would
+// otherwise still meet it.
 //
 // last_progress_at moves only when the work actually advanced. A report that
 // merely proves the agent is alive refreshes the lease and last_seen_at,
 // leaving an agent that is up but stuck distinguishable from one that is gone.
 const progressSQL = `
 UPDATE attempts a
-   SET last_seen_at     = now(),
-       lease_expires_at = now() + ($5::bigint * interval '1 millisecond'),
+   SET last_seen_at     = statement_timestamp(),
+       lease_expires_at = statement_timestamp() + ($5::bigint * interval '1 millisecond'),
        last_seq         = GREATEST(a.last_seq, $4),
        phase            = COALESCE(NULLIF($6, ''), a.phase),
        processed_bytes  = CASE WHEN $4 > a.last_seq THEN $7 ELSE a.processed_bytes END,
-       last_progress_at = CASE WHEN $8 THEN now() ELSE a.last_progress_at END
+       last_progress_at = CASE WHEN $8 THEN statement_timestamp() ELSE a.last_progress_at END
   FROM jobs j
  WHERE a.attempt_id = $2 AND a.job_id = $1
    AND j.job_id = a.job_id AND j.current_attempt_id = a.attempt_id
    AND a.superseded = false AND a.finished_at IS NULL
-   AND a.lease_expires_at > now()
+   AND a.lease_expires_at > statement_timestamp()
+   AND (j.status <> 'claimed' OR j.expires_at > statement_timestamp())
    AND a.lease_token_hash = $3
 RETURNING a.attempt_id`
 
@@ -216,24 +223,73 @@ const startRunningSQL = `
 UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, now())
  WHERE job_id = $1 AND status = 'claimed' AND current_attempt_id = $2`
 
+// lockForProgressSQL locks the job a report is for and reads whose it is and
+// where it stands. The job's row is taken before the attempt's, in the order
+// the sweeper and a flow ending a job take them, so that a report and the job
+// ending or going back to the queue take turns.
+const lockForProgressSQL = `
+SELECT status, current_attempt_id
+  FROM jobs
+ WHERE job_id = $1
+   FOR UPDATE`
+
 // RecordProgress implements Store.
+//
+// The report and, on the first one, the move to running happen in one
+// transaction under the job's lock. Apart, the job could end or be handed to
+// another attempt between the two, and the report would be answered as a
+// start of a job that is no longer this attempt's.
 func (s *PGStore) RecordProgress(ctx context.Context, jobID, attemptID string, tokenHash []byte, p Progress, lease time.Duration) (Job, error) {
-	var updated string
-	err := s.pool.QueryRow(ctx, progressSQL,
-		jobID, attemptID, tokenHash, p.Seq, lease.Milliseconds(),
-		p.Phase, p.ProcessedBytes, p.Advanced,
-	).Scan(&updated)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var (
+			status  string
+			current *string
+		)
+		err := tx.QueryRow(ctx, lockForProgressSQL, jobID).Scan(&status, &current)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrLeaseInvalid
+		}
+		if err != nil {
+			return err
+		}
+		if current == nil || *current != attemptID {
+			return ErrLeaseInvalid
+		}
+		// A claimed job past its expiry is refused by progressSQL: the
+		// sweeper is about to fail it.
+		switch Status(status) {
+		case StatusClaimed, StatusRunning, StatusCancelling:
+		default:
+			return ErrLeaseInvalid
+		}
+
+		var updated string
+		err = tx.QueryRow(ctx, progressSQL,
+			jobID, attemptID, tokenHash, p.Seq, lease.Milliseconds(),
+			p.Phase, p.ProcessedBytes, p.Advanced,
+		).Scan(&updated)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrLeaseInvalid
+		}
+		if err != nil {
+			return err
+		}
+
+		// A first report is what turns a claimed job into a running one: from
+		// here the agent may be writing, so the job can no longer be safely
+		// requeued.
+		if Status(status) == StatusClaimed {
+			if _, err := tx.Exec(ctx, startRunningSQL, jobID, attemptID); err != nil {
+				return fmt.Errorf("mark job running: %w", err)
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, ErrLeaseInvalid) {
 		return Job{}, ErrLeaseInvalid
 	}
 	if err != nil {
 		return Job{}, fmt.Errorf("record progress: %w", err)
-	}
-
-	// A first report is what turns a claimed job into a running one: from here
-	// the agent may be writing, so the job can no longer be safely requeued.
-	if _, err := s.pool.Exec(ctx, startRunningSQL, jobID, attemptID); err != nil {
-		return Job{}, fmt.Errorf("mark job running: %w", err)
 	}
 
 	job, _, err := s.Get(ctx, jobID)

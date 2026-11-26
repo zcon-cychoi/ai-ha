@@ -150,6 +150,7 @@ func runSweeper(ctx context.Context, jobs *job.Service, interval time.Duration) 
 			log.Info().
 				Int("queuedExpired", counts.QueuedExpired).
 				Int("claimedReturned", counts.ClaimedReturned).
+				Int("claimedExpired", counts.ClaimedExpired).
 				Int("runningAbandoned", counts.RunningAbandoned).
 				Int("cancelUnconfirmed", counts.CancelUnconfirmed).
 				Msg("Swept timed-out jobs")

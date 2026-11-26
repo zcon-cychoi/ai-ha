@@ -393,7 +393,7 @@ tail -n 3 /data/writer.log
 ```
 
 A를 다시 시작한다. A에서 `cap 10-old-primary-returned`, B에서도 같은 이름으로 실행한다.
-예상: A는 Secondary로 올라오고 분할 뇌 없이 SyncTarget이 되어 B를 따라잡는다.
+예상: A는 Secondary로 올라오고 split-brain 없이 SyncTarget이 되어 B를 따라잡는다.
 
 ### 8.2 복제가 끊긴 뒤 운영 노드가 계속 쓰다가 정지
 
@@ -422,7 +422,7 @@ grep -v "$(uname -n)" /data/writer.log | tail -n 1     # P가 쓴 줄 중 S에 �
 ```
 
 P의 마지막 줄과 S에 남은 P의 마지막 줄 사이가 손실 구간이다. P를 다시 시작하고 양쪽에서
-`cap 13-split-brain`을 실행한다. 예상: 분할 뇌가 감지되어 연결이 `StandAlone`으로 멈춘다. 커널 로그의
+`cap 13-split-brain`을 실행한다. 예상: split-brain이 감지되어 연결이 `StandAlone`으로 멈춘다. 커널 로그의
 문구를 12절에 적는다(오류 정보 수집에 쓴다).
 
 ---
@@ -517,7 +517,7 @@ tar czf /root/h0-$(uname -n).tgz -C /root h0
 | 8 | 운영 노드 재부팅 | Secondary, 마운트 없음, 서비스 inactive, `/data` 비어 있음. 재부팅 동안 상대도 Secondary로 남았다(자동 승격 없음) | **H0 완료 조건 충족** |
 | 9 | 샌드박스 | `modprobe` 실패, `drbdadm cstate` 동작, 직접 `mount`는 성공했지만 호스트에서 안 보임, `systemctl start data.mount`는 호스트에서 보임 | 4절 항목 8 |
 | 10 | 대기 디스크 상태 | 정상 단절(5절): `Outdated`. 상대 정지(8.1): `UpToDate`/`DUnknown`. 상대 단절(8.2): `UpToDate`/`DUnknown` — 그동안 운영은 미동기량이 쌓였다(808 KiB, 1차 4,316 KiB). **8.1과 8.2의 대기 상태가 같아 상태만으로는 최신성을 가릴 수 없다** | 4절 항목 11 |
-| 11 | 복귀 | 8.1: 분할 뇌 없이 자동 재동기화. 8.2: 양쪽 `StandAlone`. 커널 로그 `uuid_compare()=split-brain-auto-recover by rule=bitmap-both`, `Split-Brain detected but unresolved, dropping connection!`, `helper command: /sbin/drbdadm split-brain`. 상태 출력에는 사유가 없다 | 4절 항목 1·18 |
+| 11 | 복귀 | 8.1: split-brain 없이 자동 재동기화. 8.2: 양쪽 `StandAlone`. 커널 로그 `uuid_compare()=split-brain-auto-recover by rule=bitmap-both`, `Split-Brain detected but unresolved, dropping connection!`, `helper command: /sbin/drbdadm split-brain`. 상태 출력에는 사유가 없다 | 4절 항목 1·18 |
 | 12 | 8.2 손실 | 2차: P의 마지막 줄 `1794471871.96`, S에 남은 P의 마지막 줄 `1794471783.08` — 약 89초 분량. 1차: `1794465674.11` / `1794465565.21` — 약 109초. 단절 뒤에 쓴 것은 모두 사라졌다 | 7절 결정 2 |
 | 13 | 메타데이터 판별 | 새 디스크의 `show-gi`: 실패(1차 exit 1, 2차 `drbdmeta … show-gi` exit 255). 기존 메타데이터: 성공(세대 UUID 출력). `create-md` 재실행: TTY가 없으면 `Operation cancelled.`(exit 1)로 덮어쓰지 않는다 | 4절 항목 4 |
 | 14 | 서명 | 구성 전 데이터 볼륨: 서명 없음. 메타데이터가 있는 하위 디스크: `blkid`가 `TYPE="drbd"`만 보고한다(안쪽 ext4는 안 보인다). DRBD 장치: `TYPE="ext4"` | H3b 실행 전 검사 |
